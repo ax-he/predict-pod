@@ -1,0 +1,11 @@
+# fft-dummy.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fft-dummy
+spec:
+  containers:
+  - name: work
+    image: busybox
+    command: ["sh", "-c", "sleep 3600"]
+    args: ["--n","1048576","--batches","2","--dtype","float32"]
