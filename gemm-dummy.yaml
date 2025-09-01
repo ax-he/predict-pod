@@ -1,0 +1,12 @@
+# gemm-dummy.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gemm-dummy
+spec:
+  containers:
+  - name: work
+    image: busybox
+    command: ["sh", "-c", "sleep 3600"]
+    # 这里用 args 暴露 m/n/k/dtype
+    args: ["--m","1024","--n","1024","--k","1024","--dtype","float32"]
