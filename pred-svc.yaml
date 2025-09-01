@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-hw-profile
+  namespace: default
+data:
+  # 把你端侧机器的实测峰值写进来（单位：GFLOPS、GB/s）
+  peak_flops_gflops: "50.9"
+  peak_mem_bandwidth_gbs: "14.5"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pred-svc
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pred-svc }
+  template:
+    metadata:
+      labels: { app: pred-svc }
+    spec:
+      containers:
+        - name: pred-svc
+          image: pred-svc:0.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PEAK_FLOPS_GFLOPS
+              valueFrom:
+                configMapKeyRef:
+                  name: node-hw-profile
+                  key: peak_flops_gflops
+            - name: PEAK_MEM_BANDWIDTH_GBS
+              valueFrom:
+                configMapKeyRef:
+                  name: node-hw-profile
+                  key: peak_mem_bandwidth_gbs
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pred-svc
+  namespace: default
+spec:
+  selector:
+    app: pred-svc
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
