@@ -16,4 +16,4 @@ gemm-test: complex_gemm.c
 	$(CC) $(CFLAGS) $< -o $@ $(LIBS)
 
 clean:
-	rm -f gemm-test
+	rm -f libblasprobe.so gemm-test
