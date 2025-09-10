@@ -460,3 +460,205 @@ def predict_fft_from_pod(
         flops=fl, bytes=by, t_lower_bound_s=t
     )
     return decide_and_pack([kernel], time_budget_s)
+
+
+# ========= 新增：上传 .c 源码 → 调用 blas-probe Job 抓取 GEMM 参数 =========
+import base64, uuid, time, re
+from fastapi import BackgroundTasks
+
+BLAS_PROBE_IMAGE = os.getenv("BLAS_PROBE_IMAGE", "blas-probe:0.1")
+JOB_NAMESPACE = os.getenv("JOB_NAMESPACE", "default")
+
+GEMM_LOG_RE = re.compile(
+    r"\[max\]\s+\w+\s+M=(\d+)\s+N=(\d+)\s+K=(\d+)\s+FLOPs=(\d+)",
+    re.IGNORECASE
+)
+
+def _k8s_clients():
+    try:
+        from kubernetes import client, config
+    except Exception:
+        raise HTTPException(status_code=500, detail="kubernetes client not installed")
+    try:
+        config.load_incluster_config()
+    except Exception:
+        try:
+            config.load_kube_config()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"load kube config failed: {e}")
+    return client, client.CoreV1Api(), client.BatchV1Api()
+
+def _await_job_done(v1, batch, namespace: str, job_name: str, timeout_s: int = 90) -> str:
+    """等待 Job 完成；返回唯一 Pod 名称；失败/超时抛异常。"""
+    t0 = time.time()
+    pod_name = None
+    # 等 pod 出来
+    while time.time() - t0 < timeout_s:
+        pods = v1.list_namespaced_pod(
+            namespace,
+            label_selector=f"job-name={job_name}",
+            limit=1
+        )
+        if pods.items:
+            pod = pods.items[0]
+            pod_name = pod.metadata.name
+            # 等 pod 进入结束态（Succeeded/Failed）
+            if pod.status.phase in ("Succeeded", "Failed"):
+                break
+        time.sleep(1.0)
+
+    if not pod_name:
+        raise HTTPException(status_code=504, detail="job pod not found in time")
+
+    # 再确认 job 状态
+    while time.time() - t0 < timeout_s:
+        j = batch.read_namespaced_job_status(job_name, namespace)
+        s = j.status
+        if (s.succeeded and s.succeeded > 0) or (s.failed and s.failed > 0):
+            return pod_name
+        time.sleep(1.0)
+
+    raise HTTPException(status_code=504, detail="job not completed in time")
+
+def _cleanup_job_and_cm(batch, v1, namespace: str, job_name: str, cm_name: str):
+    # 删除 Job（连带其 pods）
+    try:
+        from kubernetes import client as k8s_client
+        propagation = k8s_client.V1DeleteOptions(propagation_policy="Background")
+        batch.delete_namespaced_job(name=job_name, namespace=namespace, body=propagation)
+    except Exception:
+        pass
+    # 删除 ConfigMap
+    try:
+        v1.delete_namespaced_config_map(cm_name, namespace)
+    except Exception:
+        pass
+
+def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespace: str = JOB_NAMESPACE) -> tuple[int,int,int]:
+    """创建 CM + Job，编译并 LD_PRELOAD 运行，读日志解析 M/N/K。"""
+    if len(src_c_text.encode("utf-8")) > 900*1024:
+        # ConfigMap 约 1MiB 上限，留点余量（官方提示: 单个对象数据建议 <= 1MiB）
+        # https://kubernetes.io/docs/concepts/configuration/configmap/
+        raise HTTPException(status_code=413, detail="C source too large for ConfigMap (~1MiB limit)")
+
+    client, v1, batch = _k8s_clients()
+
+    uniq = uuid.uuid4().hex[:8]
+    cm_name = f"csrc-{uniq}"
+    job_name = f"probe-{uniq}"
+
+    # 1) 创建 ConfigMap
+    from kubernetes.client import V1ObjectMeta, V1ConfigMap
+    cm = V1ConfigMap(
+        metadata=V1ObjectMeta(name=cm_name),
+        data={"user.c": src_c_text}
+    )
+    v1.create_namespaced_config_map(namespace, cm)
+
+    # 2) 创建 Job（用 blas-probe:0.1）
+    #    要求镜像里存在：
+    #      - /opt/probe/lib/libblasprobe.so  (LD_PRELOAD)
+    #      - gcc + OpenBLAS headers & lib (能 gcc ... -lopenblas)
+    from kubernetes.client import (
+        V1Job, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Container,
+        V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, V1ObjectMeta
+    )
+
+    cmd = [
+        "/bin/sh", "-lc",
+        # 编译 -> 运行（允许用户程序异常退出，因此尾部加 `|| true`），
+        # 然后把 /work/max.log 打出来，便于 read_namespaced_pod_log 获取
+        r"""
+set -e
+cp /code/user.c /work/user.c
+# 你也可以在这里替换为 clang，或添加 -I/-L 指向 OpenBLAS 位置
+gcc -O2 -o /work/a.out /work/user.c -lopenblas
+export LOG_DIR=/work
+export LD_PRELOAD=/opt/probe/lib/libblasprobe.so
+/work/a.out || true
+if [ -f /work/max.log ]; then
+  cat /work/max.log
+else
+  echo "[max] none"
+fi
+"""
+    ]
+
+    container = V1Container(
+        name="runner",
+        image=BLAS_PROBE_IMAGE,
+        command=cmd[:2],
+        args=[cmd[2]],
+        env=[],
+        volume_mounts=[
+            V1VolumeMount(name="code", mount_path="/code"),
+            V1VolumeMount(name="work", mount_path="/work")
+        ]
+    )
+
+    pod_spec = V1PodSpec(
+        restart_policy="Never",
+        containers=[container],
+        volumes=[
+            V1Volume(
+                name="code",
+                config_map=V1ConfigMapVolumeSource(name=cm_name, items=[{"key":"user.c","path":"user.c"}])
+            ),
+            V1Volume(
+                name="work",
+                empty_dir={}
+            )
+        ]
+    )
+
+    job = V1Job(
+        metadata=V1ObjectMeta(name=job_name),
+        spec=V1JobSpec(
+            ttl_seconds_after_finished=60,
+            backoff_limit=0,
+            template=V1PodTemplateSpec(
+                metadata=V1ObjectMeta(labels={"app":"blas-probe","job-name":job_name}),
+                spec=pod_spec
+            )
+        )
+    )
+
+    batch.create_namespaced_job(namespace, job)
+
+    try:
+        pod_name = _await_job_done(v1, batch, namespace, job_name, timeout_s=time_limit_s)
+        logs = v1.read_namespaced_pod_log(name=pod_name, namespace=namespace)
+    finally:
+        _cleanup_job_and_cm(batch, v1, namespace, job_name, cm_name)
+
+    m = GEMM_LOG_RE.search(logs or "")
+    if not m:
+        raise HTTPException(status_code=422, detail=f"failed to parse GEMM params from logs:\n{logs[:800] if logs else 'NO LOGS'}")
+
+    M, N, K = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return M, N, K
+
+@app.post("/predict/gemm/from_c_upload", response_model=PredictResponse)
+async def predict_gemm_from_c_upload(
+    time_budget_s: float = Form(...),
+    file: UploadFile = File(...),
+    namespace: str = Form(JOB_NAMESPACE),
+):
+    # 读上传 C 源码
+    try:
+        src = (await file.read()).decode("utf-8", errors="ignore")
+    finally:
+        await file.close()
+
+    # 调度临时 Job 获取 M/N/K
+    M, N, K = _create_job_with_cm_and_run(src, time_limit_s=90, namespace=namespace)
+
+    spec = GemmSpec(m=M, n=N, k=K, dtype="float32")  # 也可扩展从源码中探测 dtype
+    fl, by, t = gemm_cost(spec)
+    kernel = Kernel(type="gemm", params=spec.model_dump(), flops=fl, bytes=by, t_lower_bound_s=t)
+
+    resp = decide_and_pack([kernel], time_budget_s)
+    # 附带抓到的参数，便于排错
+    out = resp.model_dump()
+    out["inferred"] = {"M": M, "N": N, "K": K, "source": "LD_PRELOAD via blas-probe job"}
+    return out
