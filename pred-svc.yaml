@@ -21,13 +21,18 @@ spec:
     metadata:
       labels: { app: pred-svc }
     spec:
+      serviceAccountName: pred-svc
       containers:
         - name: pred-svc
-          image: pred-svc:0.4
+          image: pred-svc:0.6
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           env:
+            - name: BLAS_PROBE_IMAGE
+              value: "blas-probe:0.1"
+            - name: JOB_NAMESAPCE
+              value: "default"
             - name: PEAK_FLOPS_GFLOPS
               valueFrom:
                 configMapKeyRef:
