@@ -1,9 +1,8 @@
-############################
-# builder: 只用来编译和收集依赖
-############################
-FROM mirror.gcr.io/library/python:3.11-slim AS builder
+# Dockerfile.probe  —— 单阶段 ALL-IN-ONE（包含 gcc + OpenBLAS + 探针 + 运行脚本）
 
-# APT 改 https；装编译链、OpenBLAS 头文件和 CA 证书
+FROM mirror.gcr.io/library/python:3.11-slim
+
+# 1) APT 换 https，并安装编译环境 + OpenBLAS + CA 证书
 RUN set -eux; \
   if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
@@ -13,54 +12,67 @@ RUN set -eux; \
   fi; \
   apt-get update; \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential ca-certificates libopenblas-dev; \
+    build-essential ca-certificates pkg-config \
+    libopenblas-dev; \
   rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-# 你的探针源码（文件名按你项目里实际为准）
+# 2) 放源码并编译你的 LD_PRELOAD 探针 + 小测试程序
+WORKDIR /opt/probe/src
+# === 按你的文件名放到构建上下文同目录 ===
 COPY libblasprobe_roofline_modes.c .
-# 一个小的 SGEMM 自测程序（可选）
+# 可选的自测程序（如果你有）
 COPY sgemm_test.c .
 
-# 产物都放到 /out/opt/probe 下，避免污染系统目录
-RUN mkdir -p /out/opt/probe/lib /out/opt/probe/bin
-
 # 编译 LD_PRELOAD 探针
-RUN gcc -O2 -fPIC -shared -o /out/opt/probe/lib/libblasprobe.so \
-      libblasprobe_roofline_modes.c -ldl -lpthread
+RUN gcc -O2 -fPIC -shared -o /opt/probe/libblasprobe.so libblasprobe_roofline_modes.c -ldl -lpthread
 
-# 编译一个小测试程序（链接 openblas）
-RUN gcc -O2 -o /out/opt/probe/bin/sgemm_test sgemm_test.c -lopenblas
+# （可选）编译一个 SGEMM 自测程序，便于快速验证探针是否能截获
+RUN gcc -O2 -o /opt/probe/sgemm_test sgemm_test.c -lopenblas
 
-# 把 OpenBLAS 及其运行时依赖一股脑“扔进” /opt/probe/lib（扁平化）
-RUN set -eux; \
-  oblas=$(ldconfig -p | awk '/libopenblas\.so/{print $4; exit}'); \
-  cp -v "$oblas" /out/opt/probe/lib/; \
-  # 收集它依赖的 .so
-  ldd "$oblas" | awk '/=> \\/|\\//{print $(NF-1)}' | while read -r dep; do \
-    [ -f "$dep" ] && cp -v "$dep" /out/opt/probe/lib/ || true; \
-  done; \
-  # 常见的运行时（有则拷，无则跳过）
-  for n in libgfortran.so libquadmath.so; do \
-    p=$(ldconfig -p | awk -v n="$n" '$1 ~ n {print $4; exit}'); \
-    [ -n "$p" ] && cp -v "$p" /out/opt/probe/lib/ || true; \
-  done
+# 3) 放一个运行脚本：编译用户 C 文件并在 LD_PRELOAD 下执行
+RUN mkdir -p /opt/probe/bin /work
+RUN cat >/opt/probe/bin/run_probe.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+C_FILE="${1:-}"
+OUT="/work/a.out"
+LOG_DIR="/work"
+if [[ -z "$C_FILE" || ! -f "$C_FILE" ]]; then
+  echo "usage: run_probe.sh /path/to/code.c" >&2
+  exit 2
+fi
 
-############################
-# runtime: 极简，只有探针与依赖
-############################
-FROM mirror.gcr.io/library/python:3.11-slim AS runtime
+# 编译用户程序（需要其源码里 #include <cblas.h> / 调 openblas 的 cblas_* 接口）
+# 你也可以改成自动加上 -I 的路径：有的发行版 cblas.h 在 /usr/include/x86_64-linux-gnu/
+INC_CANDIDATES=("/usr/include" "/usr/include/x86_64-linux-gnu")
+INC_FLAGS=""
+for d in "${INC_CANDIDATES[@]}"; do
+  [[ -f "$d/cblas.h" ]] && INC_FLAGS="$INC_FLAGS -I$d"
+done
 
-# 带上 CA 证书（如果后续需要 https 出网）
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+echo "[probe] compiling: $C_FILE -> $OUT"
+gcc -O2 $INC_FLAGS -o "$OUT" "$C_FILE" -lopenblas
 
-# 只复制我们自己的前缀，避免和 /lib、/usr/lib 等系统目录冲突
-COPY --from=builder /out/opt/probe /opt/probe
+# 运行并让探针把最大 GEMM 规模写入 $LOG_DIR/max.log
+export LD_PRELOAD="/opt/probe/libblasprobe.so"
+export LOG_DIR="$LOG_DIR"
 
-# 运行期环境：让动态链接器能找到我们打包的依赖，并启用 LD_PRELOAD 探针
-ENV LD_LIBRARY_PATH=/opt/probe/lib:$LD_LIBRARY_PATH
-ENV LD_PRELOAD=/opt/probe/lib/libblasprobe.so
+echo "[probe] running with LD_PRELOAD..."
+set +e
+"$OUT"
+RET=$?
+set -e
+
+echo "[probe] program exit code: $RET"
+echo "[probe] ===== max.log (if any) ====="
+[[ -f "$LOG_DIR/max.log" ]] && cat "$LOG_DIR/max.log" || echo "(no max.log yet)"
+
+exit "$RET"
+SH
+RUN chmod +x /opt/probe/bin/run_probe.sh
+
+# 4) 运行期环境（K8s Job 通常会覆盖 CMD，这里默认给个“待命”）
 ENV PATH=/opt/probe/bin:$PATH
-
-# 默认跑自测程序；真实使用时会在 K8s 里覆盖
-CMD ["sgemm_test"]
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+# 方便你在 Pod 里直接手动试：LD_PRELOAD 生效 + 跑自测
+CMD ["/bin/sh", "-lc", "echo 'blas-probe image is ready'; echo 'try: LD_PRELOAD=/opt/probe/libblasprobe.so /opt/probe/sgemm_test'; sleep infinity"]
