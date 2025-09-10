@@ -1,23 +1,45 @@
-# rbac-pred-svc-reader.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pred-svc
+  namespace: default
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: pred-svc-reader
   namespace: default
 rules:
-- apiGroups: [""]
-  resources: ["pods","pods/log","configmaps","secrets"]
-  verbs: ["get","list","watch"]
+  # Job 本体 + 子资源 /status
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create","get","list","watch","delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get","watch"]
+
+  # 为了拿 Job 里的 Pod 状态与日志
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get","list","watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # 临时 ConfigMap 用来携带 C 源文件给探针 Job
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create","get","delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: pred-svc-reader-binding
+  name: pred-svc-reader
   namespace: default
 subjects:
-- kind: ServiceAccount
-  name: pred-svc          # ← 必须跟 Deployment 里的 serviceAccountName 一致
-  namespace: default
+  - kind: ServiceAccount
+    name: pred-svc
+    namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
