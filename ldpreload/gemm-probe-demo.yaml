@@ -1,0 +1,78 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemm-probe-demo
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: pred-svc
+      restartPolicy: Never
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: src
+          configMap:
+            name: gemm-src
+        - name: headers
+          configMap:
+            name: cblas-header
+      initContainers:
+        - name: copy-libs
+          image: blas-probe:0.2
+          command: ["bash","-lc"]
+          args:
+            - |
+              set -e
+              mkdir -p /work/lib
+              cp -av /opt/probe/lib/libopenblas.so* /work/lib/
+              # 确保存在无版本的链接名
+              if [ ! -e /work/lib/libopenblas.so ]; then
+                ln -s $(basename /work/lib/libopenblas.so*) /work/lib/libopenblas.so || true
+              fi
+          volumeMounts:
+            - { name: work, mountPath: /work }
+
+        - name: stage-src-headers
+          image: alpine:3.20
+          command: ["sh","-lc"]
+          args:
+            - |
+              set -e
+              mkdir -p /work/src /work/include
+              cp -av /src/src.c /work/src/
+              cp -av /headers/cblas.h /work/include/
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: src, mountPath: /src }
+            - { name: headers, mountPath: /headers }
+
+        - name: build
+          image: gcc:12-bookworm
+          command: ["bash","-lc"]
+          args:
+            - |
+              set -e
+              cd /work
+              gcc -O2 -I/work/include -L/work/lib /work/src/src.c -o /work/a.out -lopenblas
+              ls -l /work
+          volumeMounts:
+            - { name: work, mountPath: /work }
+
+      containers:
+        - name: run
+          image: blas-probe:0.2
+          env:
+            - { name: LOG_DIR, value: /work }
+            - { name: LD_LIBRARY_PATH, value: /work/lib:/opt/probe/lib }
+            - { name: LD_PRELOAD, value: /opt/probe/lib/libblasprobe.so }
+          command: ["bash","-lc"]
+          args:
+            - |
+              set -e
+              /work/a.out || true
+              echo "--- max.log ---"
+              cat /work/max.log || true
+          volumeMounts:
+            - { name: work, mountPath: /work }
