@@ -1,4 +1,6 @@
 fastapi
 uvicorn[standard]
+pydantic
+ffmpeg-python
 python-multipart
 kubernetes
