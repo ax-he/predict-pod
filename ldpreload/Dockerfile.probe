@@ -1,8 +1,6 @@
-# Dockerfile.probe  —— 单阶段 ALL-IN-ONE（包含 gcc + OpenBLAS + 探针 + 运行脚本）
-
+# Dockerfile.probe —— 含编译链 + OpenBLAS + 探针 .so（TOTAL + DRY-RUN）
 FROM mirror.gcr.io/library/python:3.11-slim
 
-# 1) APT 换 https，并安装编译环境 + OpenBLAS + CA 证书
 RUN set -eux; \
   if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
@@ -12,67 +10,17 @@ RUN set -eux; \
   fi; \
   apt-get update; \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential ca-certificates pkg-config \
-    libopenblas-dev; \
+    build-essential ca-certificates pkg-config libopenblas-dev; \
   rm -rf /var/lib/apt/lists/*
 
-# 2) 放源码并编译你的 LD_PRELOAD 探针 + 小测试程序
 WORKDIR /opt/probe/src
-# === 按你的文件名放到构建上下文同目录 ===
 COPY libblasprobe_roofline_modes.c .
-# 可选的自测程序（如果你有）
-COPY sgemm_test.c .
 
-# 编译 LD_PRELOAD 探针
-RUN gcc -O2 -fPIC -shared -o /opt/probe/libblasprobe.so libblasprobe_roofline_modes.c -ldl -lpthread
+# 编译为 TOTAL + DRY-RUN，并把 .so 放到 /opt/probe/lib/libblasprobe.so
+RUN mkdir -p /opt/probe/lib && \
+    gcc -O2 -fPIC -shared -o /opt/probe/lib/libblasprobe.so \
+        libblasprobe_roofline_modes.c -ldl -lpthread \
+        -DPROBE_MODE_TOTAL -DPROBE_DRY_RUN
 
-# （可选）编译一个 SGEMM 自测程序，便于快速验证探针是否能截获
-RUN gcc -O2 -o /opt/probe/sgemm_test sgemm_test.c -lopenblas
-
-# 3) 放一个运行脚本：编译用户 C 文件并在 LD_PRELOAD 下执行
-RUN mkdir -p /opt/probe/bin /work
-RUN cat >/opt/probe/bin/run_probe.sh <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-C_FILE="${1:-}"
-OUT="/work/a.out"
-LOG_DIR="/work"
-if [[ -z "$C_FILE" || ! -f "$C_FILE" ]]; then
-  echo "usage: run_probe.sh /path/to/code.c" >&2
-  exit 2
-fi
-
-# 编译用户程序（需要其源码里 #include <cblas.h> / 调 openblas 的 cblas_* 接口）
-# 你也可以改成自动加上 -I 的路径：有的发行版 cblas.h 在 /usr/include/x86_64-linux-gnu/
-INC_CANDIDATES=("/usr/include" "/usr/include/x86_64-linux-gnu")
-INC_FLAGS=""
-for d in "${INC_CANDIDATES[@]}"; do
-  [[ -f "$d/cblas.h" ]] && INC_FLAGS="$INC_FLAGS -I$d"
-done
-
-echo "[probe] compiling: $C_FILE -> $OUT"
-gcc -O2 $INC_FLAGS -o "$OUT" "$C_FILE" -lopenblas
-
-# 运行并让探针把最大 GEMM 规模写入 $LOG_DIR/max.log
-export LD_PRELOAD="/opt/probe/libblasprobe.so"
-export LOG_DIR="$LOG_DIR"
-
-echo "[probe] running with LD_PRELOAD..."
-set +e
-"$OUT"
-RET=$?
-set -e
-
-echo "[probe] program exit code: $RET"
-echo "[probe] ===== max.log (if any) ====="
-[[ -f "$LOG_DIR/max.log" ]] && cat "$LOG_DIR/max.log" || echo "(no max.log yet)"
-
-exit "$RET"
-SH
-RUN chmod +x /opt/probe/bin/run_probe.sh
-
-# 4) 运行期环境（K8s Job 通常会覆盖 CMD，这里默认给个“待命”）
-ENV PATH=/opt/probe/bin:$PATH
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-# 方便你在 Pod 里直接手动试：LD_PRELOAD 生效 + 跑自测
-CMD ["/bin/sh", "-lc", "echo 'blas-probe image is ready'; echo 'try: LD_PRELOAD=/opt/probe/libblasprobe.so /opt/probe/sgemm_test'; sleep infinity"]
+CMD ["/bin/sh", "-lc", "echo 'blas-probe ready (TOTAL+DRYRUN)'; sleep infinity"]
