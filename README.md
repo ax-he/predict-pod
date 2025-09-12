@@ -45,7 +45,7 @@ B`)` 保持YAML不变，切换运行的Deployment
 
 kubectl -n default set image deploy/pred-svc pred-svc=pred-svc:0.8
 
-## 查看滚动发布状态
+**查看滚动发布状态**
 
 kubectl -n default rollout status deploy/pred-svc
 
