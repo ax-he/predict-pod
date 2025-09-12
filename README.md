@@ -87,4 +87,5 @@ curl -fsS -X POST   -F "time_budget_s=20000"   -F "file=@/home/haga/NDSS.mp4;typ
 **GEMM算力任务触发**
 
 curl -s -F time_budget_s=0.1 -F file=@/home/haga/pred-svc/test/complex_gemm.c   http://127.0.0.1:8080/predict/gemm/from_c_upload | jq .
-<img width="1156" height="604" alt="image" src="https://github.com/user-attachments/assets/4dcbf425-1b2f-4407-87cb-4b18e467cca9" />
+<img width="1486" height="1164" alt="gemm_c_file" src="https://github.com/user-attachments/assets/770256b1-a4da-414e-b272-9cb27d0f7f01" />
+
