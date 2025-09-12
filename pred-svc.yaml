@@ -4,7 +4,6 @@ metadata:
   name: node-hw-profile
   namespace: default
 data:
-  # 把你端侧机器的实测峰值写进来（单位：GFLOPS、GB/s）
   peak_flops_gflops: "50.9"
   peak_mem_bandwidth_gbs: "14.5"
 ---
@@ -24,14 +23,16 @@ spec:
       serviceAccountName: pred-svc
       containers:
         - name: pred-svc
-          image: pred-svc:0.6
+          # 这里改成 0.8
+          image: pred-svc:0.8
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           env:
+            # 这里改成 0.3（pred-svc 在创建 Job 时会用到这个镜像）
             - name: BLAS_PROBE_IMAGE
-              value: "blas-probe:0.1"
-            - name: JOB_NAMESAPCE
+              value: "blas-probe:0.3"
+            - name: JOB_NAMESPACE
               value: "default"
             - name: PEAK_FLOPS_GFLOPS
               valueFrom:
@@ -44,12 +45,8 @@ spec:
                   name: node-hw-profile
                   key: peak_mem_bandwidth_gbs
           resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
 ---
 apiVersion: v1
 kind: Service
