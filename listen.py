@@ -1,10 +1,11 @@
 # ~/pred-svc/listen.py
+# 9.12 v0.8 test
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Literal, Optional, List, Dict, Any
-import math, os, subprocess, json, tempfile, shutil
+import math, os, subprocess, json, tempfile, re, uuid, time
 
-app = FastAPI(title="pred-svc", version="0.3")
+app = FastAPI(title="pred-svc", version="0.7")
 
 # ---------- 读机器峰值（来自环境变量 / ConfigMap） ----------
 def getenv_float(name: str, default: float) -> float:
@@ -14,12 +15,12 @@ def getenv_float(name: str, default: float) -> float:
     except Exception:
         return default
 
-PEAK_FLOPS_GFLOPS = getenv_float("PEAK_FLOPS_GFLOPS", 50.0)     # 例：50 GFLOPS
+PEAK_FLOPS_GFLOPS = getenv_float("PEAK_FLOPS_GFLOPS", 50.0)      # 例：50 GFLOPS
 PEAK_MEM_BANDWIDTH_GBS = getenv_float("PEAK_MEM_BANDWIDTH_GBS", 15.0)  # 例：15 GB/s
 LOCAL_TIME_BUDGET_S = getenv_float("LOCAL_TIME_BUDGET_S", 10.0)  # 默认本地预算 10s
 
-PEAK_FLOPS = PEAK_FLOPS_GFLOPS * 1e9         # FLOPs/s
-PEAK_BW    = PEAK_MEM_BANDWIDTH_GBS * (1024**3)  # Bytes/s（按GiB/s）
+PEAK_FLOPS = PEAK_FLOPS_GFLOPS * 1e9              # FLOPs/s
+PEAK_BW    = PEAK_MEM_BANDWIDTH_GBS * (1024**3)   # Bytes/s（按GiB/s）
 
 # ---------- 请求/响应模型 ----------
 DType = Literal["float16", "float32", "float64", "int8"]
@@ -34,14 +35,13 @@ class FFT1DSpec(BaseModel):
     dtype: DType = "float32"
 
 class TranscodeSpec(BaseModel):
-    # 任选其一：直接给媒体路径/URL，或手填元数据
     input: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
     fps: Optional[float] = None
     duration_s: Optional[float] = None
-    codec: Optional[str] = None        # 用于经验权重
-    preset: Optional[str] = None       # ultrafast/fast/medium/slow...
+    codec: Optional[str] = None
+    preset: Optional[str] = None
 
 class Kernel(BaseModel):
     type: Literal["gemm", "fft1d", "transcode"]
@@ -144,8 +144,7 @@ def transcode_cost(spec: TranscodeSpec):
     pixels = float(w) * float(h) * float(fps) * float(duration)
     weight = weight_from_codec_preset(codec, spec.preset)
 
-    # 占位：用像素量×权重估 FLOPs；Bytes 近似读+写
-    flops = 200.0 * pixels * weight     # 之后可用回归替换
+    flops = 200.0 * pixels * weight     # 粗略；可用回归替换
     bytes_ = 3.0 * pixels
     t = max(flops / PEAK_FLOPS, bytes_ / PEAK_BW)
     return flops, bytes_, t
@@ -231,12 +230,9 @@ def predict(req: PredictRequest):
 @app.post("/predict/transcode/upload", response_model=PredictResponse)
 async def predict_transcode_upload(
     time_budget_s: float = Form(...),
-    preset: Optional[str] = Form(None),          # 可选：用户声明编码预设
-    file: UploadFile = File(...),                # 视频文件
+    preset: Optional[str] = Form(None),
+    file: UploadFile = File(...),
 ):
-    # FastAPI 处理表单/文件上传需要 python-multipart 支持
-    # 参考官方文档：https://fastapi.tiangolo.com/tutorial/request-forms-and-files/
-    # 把上传内容落到容器 /tmp，避免一次性读入内存
     suffix = os.path.splitext(file.filename or "")[1]
     tmp_dir = "/tmp"
     os.makedirs(tmp_dir, exist_ok=True)
@@ -244,14 +240,12 @@ async def predict_transcode_upload(
     tmp_path = tmpf.name
     try:
         with tmpf as f:
-            # 以流式方式拷贝
             while True:
                 chunk = await file.read(1024 * 1024)  # 1MB/chunk
                 if not chunk:
                     break
                 f.write(chunk)
 
-        # 用 ffprobe 抽取元数据
         info = run_ffprobe_json(tmp_path)
         vstreams = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
         if not vstreams:
@@ -264,7 +258,6 @@ async def predict_transcode_upload(
         duration_s = float(info.get("format", {}).get("duration", "0") or 0)
         codec = vs.get("codec_name")
 
-        # 构造一次 transcode kernel
         spec = TranscodeSpec(
             width=width, height=height, fps=fps, duration_s=duration_s,
             codec=codec, preset=preset
@@ -286,20 +279,17 @@ async def predict_transcode_upload(
 
 
 # =====================================================================
-# ===============  新增：从 Kubernetes Pod 自动解析 GEMM/FFT  ==========
+# ===============  从 Kubernetes Pod 自动解析 GEMM/FFT  ==============
 # =====================================================================
 
-# 懒加载 K8s 客户端（容器里需 pip 安装 kubernetes；RBAC 需 get/list pod、configmaps）
 def _load_k8s_clients():
     try:
         from kubernetes import client, config
     except Exception:
         raise HTTPException(status_code=500, detail="kubernetes client is not installed in image")
     try:
-        # in-cluster 优先（ServiceAccount 注入的方式）
         config.load_incluster_config()
     except Exception:
-        # 回退到本地 kubeconfig（便于本地调试）
         try:
             config.load_kube_config()
         except Exception as e:
@@ -323,13 +313,11 @@ def _resolve_env_dict(v1, namespace: str, pod, container) -> Dict[str, str]:
     """解析容器环境变量：env + envFrom(configMapRef)。为安全起见不读取 Secret。"""
     env: Dict[str, str] = {}
 
-    # 直接 env=...
     if getattr(container, "env", None):
         for e in container.env:
             if getattr(e, "value", None) is not None:
                 env[e.name] = e.value
             else:
-                # configMapKeyRef
                 src = getattr(e, "value_from", None)
                 cmr = getattr(src, "config_map_key_ref", None) if src else None
                 if cmr and cmr.name and cmr.key:
@@ -340,9 +328,7 @@ def _resolve_env_dict(v1, namespace: str, pod, container) -> Dict[str, str]:
                             env[e.name] = data[cmr.key]
                     except Exception:
                         pass
-                # Secret 不读取
 
-    # envFrom(configMapRef)
     if getattr(container, "env_from", None):
         for ef in container.env_from:
             cmref = getattr(ef, "config_map_ref", None)
@@ -350,12 +336,10 @@ def _resolve_env_dict(v1, namespace: str, pod, container) -> Dict[str, str]:
                 try:
                     cm = v1.read_namespaced_config_map(cmref.name, namespace)
                     data = cm.data or {}
-                    # 注意：无 prefix 处理。如有需要可读取 ef.prefix
                     for k, v in data.items():
                         env[k] = v
                 except Exception:
                     pass
-            # Secret 不读取
     return env
 
 def _collect_args(container) -> List[str]:
@@ -367,7 +351,6 @@ def _collect_args(container) -> List[str]:
     return args
 
 def _read_flag(args: List[str], names: List[str]) -> Optional[str]:
-    # 支持 --m 1024 / --m=1024 / -m 1024 / -m=1024
     for i, a in enumerate(args):
         for n in names:
             if a == n and i + 1 < len(args):
@@ -462,17 +445,19 @@ def predict_fft_from_pod(
     return decide_and_pack([kernel], time_budget_s)
 
 
-# ========= 新增：上传 .c 源码 → 调用 blas-probe Job 抓取 GEMM 参数 =========
-import base64, uuid, time, re
-from fastapi import BackgroundTasks
+# ========= 通过 K8s Job + LD_PRELOAD 探针从 .c 源码抓 GEMM =========
 
-BLAS_PROBE_IMAGE = os.getenv("BLAS_PROBE_IMAGE", "blas-probe:0.1")
+BLAS_PROBE_IMAGE = os.getenv("BLAS_PROBE_IMAGE", "blas-probe:0.3")
 JOB_NAMESPACE = os.getenv("JOB_NAMESPACE", "default")
 
+# 兼容老版 [max] 行
 GEMM_LOG_RE = re.compile(
     r"\[max\]\s+\w+\s+M=(\d+)\s+N=(\d+)\s+K=(\d+)\s+FLOPs=(\d+)",
     re.IGNORECASE
 )
+# 新版 TOTAL/MAX 行
+GEMM_TOTAL_LOG_RE = re.compile(r"\[probe\].*TOTAL:.*FLOPs=([0-9.]+).*Bytes=([0-9.]+)", re.IGNORECASE)
+GEMM_MAX_LOG_RE   = re.compile(r"\[probe\].*MAX:.*M=(\d+)\s+N=(\d+)\s+K=(\d+).*FLOPs=([0-9.]+).*Bytes=([0-9.]+)", re.IGNORECASE)
 
 def _k8s_clients():
     try:
@@ -492,53 +477,42 @@ def _await_job_done(v1, batch, namespace: str, job_name: str, timeout_s: int = 9
     """等待 Job 完成；返回唯一 Pod 名称；失败/超时抛异常。"""
     t0 = time.time()
     pod_name = None
-    # 等 pod 出来
     while time.time() - t0 < timeout_s:
-        pods = v1.list_namespaced_pod(
-            namespace,
-            label_selector=f"job-name={job_name}",
-            limit=1
-        )
+        pods = v1.list_namespaced_pod(namespace, label_selector=f"job-name={job_name}", limit=1)
         if pods.items:
             pod = pods.items[0]
             pod_name = pod.metadata.name
-            # 等 pod 进入结束态（Succeeded/Failed）
             if pod.status.phase in ("Succeeded", "Failed"):
                 break
         time.sleep(1.0)
-
     if not pod_name:
         raise HTTPException(status_code=504, detail="job pod not found in time")
 
-    # 再确认 job 状态
     while time.time() - t0 < timeout_s:
         j = batch.read_namespaced_job_status(job_name, namespace)
         s = j.status
         if (s.succeeded and s.succeeded > 0) or (s.failed and s.failed > 0):
             return pod_name
         time.sleep(1.0)
-
     raise HTTPException(status_code=504, detail="job not completed in time")
 
 def _cleanup_job_and_cm(batch, v1, namespace: str, job_name: str, cm_name: str):
-    # 删除 Job（连带其 pods）
+    if os.getenv("KEEP_PROBE_JOB", "0") == "1":
+        return
     try:
         from kubernetes import client as k8s_client
         propagation = k8s_client.V1DeleteOptions(propagation_policy="Background")
         batch.delete_namespaced_job(name=job_name, namespace=namespace, body=propagation)
     except Exception:
         pass
-    # 删除 ConfigMap
     try:
         v1.delete_namespaced_config_map(cm_name, namespace)
     except Exception:
         pass
 
-def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespace: str = JOB_NAMESPACE) -> tuple[int,int,int]:
-    """创建 CM + Job，编译并 LD_PRELOAD 运行，读日志解析 M/N/K。"""
-    if len(src_c_text.encode("utf-8")) > 900*1024:
-        # ConfigMap 约 1MiB 上限，留点余量（官方提示: 单个对象数据建议 <= 1MiB）
-        # https://kubernetes.io/docs/concepts/configuration/configmap/
+def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespace: str = JOB_NAMESPACE) -> tuple[int, int, int]:
+    """创建 ConfigMap + Job，编译并 LD_PRELOAD 运行，读日志解析 M/N/K（兼容 TOTAL/MAX/旧版输出）。"""
+    if len(src_c_text.encode("utf-8")) > 900 * 1024:
         raise HTTPException(status_code=413, detail="C source too large for ConfigMap (~1MiB limit)")
 
     client, v1, batch = _k8s_clients()
@@ -547,68 +521,89 @@ def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespa
     cm_name = f"csrc-{uniq}"
     job_name = f"probe-{uniq}"
 
-    # 1) 创建 ConfigMap
+    # 1) 把源码放进 ConfigMap
     from kubernetes.client import V1ObjectMeta, V1ConfigMap
-    cm = V1ConfigMap(
-        metadata=V1ObjectMeta(name=cm_name),
-        data={"user.c": src_c_text}
-    )
+    cm = V1ConfigMap(metadata=V1ObjectMeta(name=cm_name), data={"user.c": src_c_text})
     v1.create_namespaced_config_map(namespace, cm)
 
-    # 2) 创建 Job（用 blas-probe:0.1）
-    #    要求镜像里存在：
-    #      - /opt/probe/lib/libblasprobe.so  (LD_PRELOAD)
-    #      - gcc + OpenBLAS headers & lib (能 gcc ... -lopenblas)
+    # 2) 创建 Job：容器内编译 + 运行 + 打印日志
     from kubernetes.client import (
         V1Job, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Container,
         V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, V1ObjectMeta
     )
 
-    cmd = [
-        "/bin/sh", "-lc",
-        # 编译 -> 运行（允许用户程序异常退出，因此尾部加 `|| true`），
-        # 然后把 /work/max.log 打出来，便于 read_namespaced_pod_log 获取
-        r"""
-set -e
+    shell = r"""
+set -euo pipefail
 cp /code/user.c /work/user.c
-# 你也可以在这里替换为 clang，或添加 -I/-L 指向 OpenBLAS 位置
-gcc -O2 -o /work/a.out /work/user.c -lopenblas
-export LOG_DIR=/work
-export LD_PRELOAD=/opt/probe/lib/libblasprobe.so
-/work/a.out || true
-if [ -f /work/max.log ]; then
-  cat /work/max.log
-else
-  echo "[max] none"
+
+echo "[probe-job] === compile phase ==="
+INC_OB="/usr/include/x86_64-linux-gnu/openblas-pthread"
+LIB_OB="/usr/lib/x86_64-linux-gnu/openblas-pthread"
+
+set +e
+PKG_CFLAGS="$(pkg-config --cflags openblas 2>/dev/null)"
+PKG_LIBS="$(pkg-config --libs openblas 2>/dev/null)"
+set -e
+
+COMPILE_OK=0
+if [ -n "${PKG_LIBS:-}" ]; then
+  echo "[probe-job][try pkg-config] gcc -O2 $PKG_CFLAGS -o /work/a.out /work/user.c $PKG_LIBS -lm -lpthread -Wl,--no-as-needed"
+  if gcc -O2 $PKG_CFLAGS -o /work/a.out /work/user.c $PKG_LIBS -lm -lpthread -Wl,--no-as-needed; then
+    COMPILE_OK=1
+  fi
 fi
+
+if [ $COMPILE_OK -eq 0 ]; then
+  echo "[probe-job][try explicit] gcc -O2 -I$INC_OB -L$LIB_OB -o /work/a.out /work/user.c -lopenblas -lm -lpthread -Wl,--no-as-needed"
+  if gcc -O2 -I"$INC_OB" -L"$LIB_OB" -o /work/a.out /work/user.c -lopenblas -lm -lpthread -Wl,--no-as-needed; then
+    COMPILE_OK=1
+  fi
+fi
+
+if [ $COMPILE_OK -eq 0 ]; then
+  echo "[probe-job][fallback] gcc -O2 -o /work/a.out /work/user.c -lcblas -lblas -lm -lpthread -Wl,--no-as-needed"
+  if gcc -O2 -o /work/a.out /work/user.c -lcblas -lblas -lm -lpthread -Wl,--no-as-needed; then
+    COMPILE_OK=1
+  fi
+fi
+
+if [ $COMPILE_OK -eq 0 ]; then
+  echo "[probe-job] ERROR: failed to compile with OpenBLAS/CBLAS" >&2
+  exit 86
+fi
+
+echo "[probe-job] ldd /work/a.out:"
+ldd /work/a.out || true
+
+echo "[probe-job] === run phase (LD_PRELOAD) ==="
+export LD_PRELOAD=/opt/probe/lib/libblasprobe.so
+export PROBE_DRY_RUN=1
+export LOG_DIR=/work
+/work/a.out || true
+
+[ -f /work/max.log ] && cat /work/max.log || true
 """
-    ]
+
+    cmd = ["/bin/sh", "-lc", shell]
 
     container = V1Container(
         name="runner",
         image=BLAS_PROBE_IMAGE,
         command=cmd[:2],
         args=[cmd[2]],
-        env=[],
         volume_mounts=[
             V1VolumeMount(name="code", mount_path="/code"),
-            V1VolumeMount(name="work", mount_path="/work")
-        ]
+            V1VolumeMount(name="work", mount_path="/work"),
+        ],
     )
 
     pod_spec = V1PodSpec(
         restart_policy="Never",
         containers=[container],
         volumes=[
-            V1Volume(
-                name="code",
-                config_map=V1ConfigMapVolumeSource(name=cm_name, items=[{"key":"user.c","path":"user.c"}])
-            ),
-            V1Volume(
-                name="work",
-                empty_dir={}
-            )
-        ]
+            V1Volume(name="code", config_map=V1ConfigMapVolumeSource(name=cm_name, items=[{"key": "user.c", "path": "user.c"}])),
+            V1Volume(name="work", empty_dir={}),
+        ],
     )
 
     job = V1Job(
@@ -617,10 +612,10 @@ fi
             ttl_seconds_after_finished=60,
             backoff_limit=0,
             template=V1PodTemplateSpec(
-                metadata=V1ObjectMeta(labels={"app":"blas-probe","job-name":job_name}),
-                spec=pod_spec
-            )
-        )
+                metadata=V1ObjectMeta(labels={"app": "blas-probe", "job-name": job_name}),
+                spec=pod_spec,
+            ),
+        ),
     )
 
     batch.create_namespaced_job(namespace, job)
@@ -631,12 +626,26 @@ fi
     finally:
         _cleanup_job_and_cm(batch, v1, namespace, job_name, cm_name)
 
-    m = GEMM_LOG_RE.search(logs or "")
-    if not m:
-        raise HTTPException(status_code=422, detail=f"failed to parse GEMM params from logs:\n{logs[:800] if logs else 'NO LOGS'}")
+    # 兼容三种日志格式：TOTAL / MAX / 旧版 [max]
+    if logs is None:
+        logs = ""
 
-    M, N, K = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    return M, N, K
+    m_total = GEMM_TOTAL_LOG_RE.search(logs)
+    m_max = GEMM_MAX_LOG_RE.search(logs)
+    m_legacy = GEMM_LOG_RE.search(logs)
+
+    if m_total:
+        FLOPs = float(m_total.group(1))
+        # 用等效 K 归一化个“近似 GEMM”，只为后续算 FLOPs/Bytes（不影响最终决策）
+        K = max(int(round((FLOPs / 2.0) ** (1.0 / 3.0))), 1)
+        return K, K, K
+    if m_max:
+        M, N, K = int(m_max.group(1)), int(m_max.group(2)), int(m_max.group(3))
+        return M, N, K
+    if m_legacy:
+        return int(m_legacy.group(1)), int(m_legacy.group(2)), int(m_legacy.group(3))
+
+    raise HTTPException(status_code=422, detail=f"failed to parse GEMM from logs:\n{logs[:800] if logs else 'NO LOGS'}")
 
 @app.post("/predict/gemm/from_c_upload", response_model=PredictResponse)
 async def predict_gemm_from_c_upload(
@@ -644,7 +653,7 @@ async def predict_gemm_from_c_upload(
     file: UploadFile = File(...),
     namespace: str = Form(JOB_NAMESPACE),
 ):
-    # 读上传 C 源码
+    # 读上传 C 源码（FastAPI 处理 multipart 需 python-multipart 支持）
     try:
         src = (await file.read()).decode("utf-8", errors="ignore")
     finally:
@@ -653,12 +662,11 @@ async def predict_gemm_from_c_upload(
     # 调度临时 Job 获取 M/N/K
     M, N, K = _create_job_with_cm_and_run(src, time_limit_s=90, namespace=namespace)
 
-    spec = GemmSpec(m=M, n=N, k=K, dtype="float32")  # 也可扩展从源码中探测 dtype
+    spec = GemmSpec(m=M, n=N, k=K, dtype="float32")  # 也可扩展从源码探测 dtype
     fl, by, t = gemm_cost(spec)
     kernel = Kernel(type="gemm", params=spec.model_dump(), flops=fl, bytes=by, t_lower_bound_s=t)
 
     resp = decide_and_pack([kernel], time_budget_s)
-    # 附带抓到的参数，便于排错
     out = resp.model_dump()
     out["inferred"] = {"M": M, "N": N, "K": K, "source": "LD_PRELOAD via blas-probe job"}
     return out
