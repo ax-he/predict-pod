@@ -1,4 +1,4 @@
-// libblasprobe_roofline_modes.c — MAX/TOTAL 两模式 + DRY-RUN + 每次拦截仅输出 M,N,K / FLOPs / Bytes
+// libblasprobe_roofline_modes.c — MAX/TOTAL + DRY-RUN + 逐次/汇总输出 +（新增）LOG_DIR/max.log
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
@@ -11,11 +11,16 @@
 #include <stdio.h>
 #include <cblas.h>
 
+/* ----- 默认启用 TOTAL；若外部已 -DPROBE_MODE_* 则以外部为准 ----- */
 #if !defined(PROBE_MODE_MAX) && !defined(PROBE_MODE_TOTAL)
-#  define PROBE_MODE_MAX 1
+#  define PROBE_MODE_TOTAL 1
 #endif
 
-/* ==== DRY-RUN 开关（运行时 PROBE_DRY_RUN=1；或编译期 -DPROBE_DRY_RUN） ==== */
+/* ----- 默认开启 DRY-RUN；若外部已 -DPROBE_DRY_RUN=0 或未定义，可覆盖 ----- */
+#ifndef PROBE_DRY_RUN
+#  define PROBE_DRY_RUN 1
+#endif
+
 static inline int is_dry_run(void){
 #ifdef PROBE_DRY_RUN
     return 1;
@@ -37,7 +42,7 @@ static long gM=0, gN=0, gK=0;
 static int  g_dtype_bytes = 8; /* 8=double, 4=float */
 #endif
 
-/* ---------- 可靠写 ---------- */
+/* ---- safe write ---- */
 static void write_all(int fd, const char* buf, size_t len){
     while (len > 0){
         ssize_t n = write(fd, buf, len);
@@ -54,7 +59,7 @@ static void wprint(const char* fmt, ...){
     if (n > 0) write_all(2, buf, (size_t)n);
 }
 
-/* ---------- 符号解析（仅非 DRY-RUN 需要） ---------- */
+/* ---- symbol resolve ---- */
 static void* resolve_sym(const char* name){
     void* s = dlsym(RTLD_NEXT, name);
     if (!s){
@@ -75,14 +80,13 @@ static void* resolve_sym(const char* name){
         *(void**)(&var) = s;                                        \
     }}while(0)
 
-/* ---------- Roofline 相关（2MNK 与 P×[K(M+N)+2MN]） ---------- */
+/* ---- roofline helpers ---- */
 static inline unsigned long long flops_u64(long M,long N,long K){
-    long double d = 2.0L*(long double)M*(long double)N*(long double)K; /* 2MNK flops */
+    long double d = 2.0L*(long double)M*(long double)N*(long double)K;
     if (d < 0) d = 0;
     return (unsigned long long)(d + 0.5L);
 }
 static inline long double bytes_ld(long M,long N,long K,int bpe){
-    /* 读A(MK) + 读B(KN) + 读写C(2MN) —— 通用下界近似 */
     return (long double)bpe * ( (long double)M*(long double)K +
                                 (long double)K*(long double)N +
                           2.0L*(long double)M*(long double)N );
@@ -90,10 +94,8 @@ static inline long double bytes_ld(long M,long N,long K,int bpe){
 static double env_double(const char* key, double defv){
     const char* s = getenv(key);
     if (!s || !*s) return defv;
-    char* end = NULL;
-    double v = strtod(s, &end);
-    if (end==s) return defv;
-    return v;
+    char* end = NULL; double v = strtod(s, &end);
+    if (end==s) return defv; return v;
 }
 static int parse_budgets(const char* s, double* out, int cap){
     int n=0; if(!s||!*s) return 0;
@@ -106,7 +108,7 @@ static int parse_budgets(const char* s, double* out, int cap){
     return n;
 }
 
-/* ---------- 新增：每次拦截的“仅参数+FLOPs+Bytes”输出（仅 DRY-RUN 时打印） ---------- */
+/* ---- per-call log (DRY-RUN only) ---- */
 static void log_per_call(long M,long N,long K,int dtype_bytes,const char* who){
     if (!is_dry_run()) return;
     unsigned long long f = flops_u64(M,N,K);
@@ -115,11 +117,11 @@ static void log_per_call(long M,long N,long K,int dtype_bytes,const char* who){
            who, M,N,K, (dtype_bytes==4?"float":"double"), f, b);
 }
 
-/* ---------- 记账（MAX/TOTAL） ---------- */
+/* ---- accounting ---- */
 static void account(long M,long N,long K,int dtype_bytes){
     unsigned long long f = flops_u64(M,N,K);
-    long double       b = bytes_ld(M,N,K,dtype_bytes);
 #if defined(PROBE_MODE_TOTAL)
+    long double       b = bytes_ld(M,N,K,dtype_bytes);
     pthread_mutex_lock(&g_mtx);
     g_tot_flops += (long double)f;
     g_tot_bytes += b;
@@ -134,7 +136,21 @@ static void account(long M,long N,long K,int dtype_bytes){
     atomic_fetch_add(&g_calls, 1ULL);
 }
 
-/* ---------- 退出时汇总 + YES/NO 判定（沿用原有逻辑） ---------- */
+/* ---- NEW: write [max] line into $LOG_DIR/max.log if set ---- */
+static void write_maxlog_if_needed(double FLOPs){
+#if !defined(PROBE_MODE_TOTAL)
+    const char* dir = getenv("LOG_DIR");
+    if (!dir || !*dir) return;
+    char path[256]; snprintf(path, sizeof(path), "%s/%s", dir, "max.log");
+    FILE* fp = fopen(path, "w");
+    if (!fp) return;
+    /* listen.py 的正则期望：[max] <word> M= N= K= FLOPs= */
+    fprintf(fp, "[max] GEMM M=%ld N=%ld K=%ld FLOPs=%.0f\n", gM, gN, gK, FLOPs);
+    fclose(fp);
+#endif
+}
+
+/* ---- summarize & decide ---- */
 static void summarize_and_decide(void){
 #if defined(PROBE_MODE_TOTAL)
     if (g_tot_flops <= 0.0L) return;
@@ -147,8 +163,8 @@ static void summarize_and_decide(void){
     double BYTES = (double)bytes_ld(gM,gN,gK,g_dtype_bytes);
     const char* mode = "MAX";
 #endif
-    double peak_gflops = env_double("PEAK_GFLOPS", 50.906); // GF/s
-    double mem_bw_gbs  = env_double("MEM_BW_GBS",  14.53);  // GB/s
+    double peak_gflops = env_double("PEAK_GFLOPS", 50.906);
+    double mem_bw_gbs  = env_double("MEM_BW_GBS",  14.53);
 
     const char* s_mode = getenv(
     #if defined(PROBE_MODE_TOTAL)
@@ -160,8 +176,8 @@ static void summarize_and_decide(void){
     const char* s_list = (s_mode && *s_mode) ? s_mode :
                          (getenv("TIME_BUDGETS") && *getenv("TIME_BUDGETS") ? getenv("TIME_BUDGETS")
                                                                             : getenv("TIME_BUDGET"));
-    double budgets[8]; int nb = parse_budgets(s_list, budgets, 8);
 
+    double budgets[8]; int nb = parse_budgets(s_list, budgets, 8);
     double ai = BYTES>0 ? (FLOPs/BYTES) : 0.0;
     double t_compute = FLOPs / (peak_gflops * 1e9);
     double t_memory  = BYTES / (mem_bw_gbs * 1e9);
@@ -180,6 +196,9 @@ static void summarize_and_decide(void){
 
     if (nb <= 0){
         wprint("[probe] no TIME_BUDGET provided; set TIME_BUDGET=secs or TIME_BUDGETS=\"0.2,0.5\".\n");
+#if !defined(PROBE_MODE_TOTAL)
+        write_maxlog_if_needed(FLOPs);  /* 即便没预算，也写一行 max.log 供解析 */
+#endif
         return;
     }
     for (int i=0;i<nb;i++){
@@ -188,14 +207,16 @@ static void summarize_and_decide(void){
         double req_gbps   = BYTES / (Tb * 1e9);
         const char* ok = (req_gflops <= peak_gflops && req_gbps <= mem_bw_gbs) ? "yes" : "no";
         wprint("[probe] require: %.3f GF/s & %.3f GB/s within %.6fs  => %s\n", req_gflops, req_gbps, Tb, ok);
-        if (nb == 1){ write_all(2, ok, strlen(ok)); write_all(2, "\n", 1); }
     }
+#if !defined(PROBE_MODE_TOTAL)
+    write_maxlog_if_needed(FLOPs);
+#endif
 }
 
 __attribute__((constructor))
 static void init_probe(void){ atexit(summarize_and_decide); }
 
-/* ---------- CBLAS 包装：DRY-RUN 时仅记账+逐次打印，不执行真 GEMM ---------- */
+/* ---- wrappers ---- */
 void cblas_dgemm(const enum CBLAS_ORDER Order,
   const enum CBLAS_TRANSPOSE TA, const enum CBLAS_TRANSPOSE TB,
   const int M, const int N, const int K,
