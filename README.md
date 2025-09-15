@@ -82,10 +82,7 @@ curl -fsS http://127.0.0.1:8080/openapi.json | jq '.paths | keys'
 **转码任务触发**
 
 curl -fsS -X POST   -F "time_budget_s=20000"   -F "file=@/home/haga/NDSS.mp4;type=video/mp4"   http://127.0.0.1:8080/predict/transcode/upload | jq
-<img width="2028" height="1188" alt="videotranscode" src="https://github.com/user-attachments/assets/e75dfd72-6949-4942-afdd-86de5f07648e" />
 
 **GEMM算力任务触发**
 
 curl -s -F time_budget_s=0.1 -F file=@/home/haga/pred-svc/test/complex_gemm.c   http://127.0.0.1:8080/predict/gemm/from_c_upload | jq .
-<img width="1486" height="1164" alt="gemm_c_file" src="https://github.com/user-attachments/assets/770256b1-a4da-414e-b272-9cb27d0f7f01" />
-
