@@ -24,7 +24,7 @@ spec:
       containers:
         - name: pred-svc
           # 这里改成 0.8
-          image: pred-svc:0.8
+          image: pred-svc:2.1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -32,6 +32,9 @@ spec:
             # 这里改成 0.3（pred-svc 在创建 Job 时会用到这个镜像）
             - name: BLAS_PROBE_IMAGE
               value: "blas-probe:0.3"
+            # 新增FFT探针镜像，值为 fft-probe:0.1
+            - name: FFT_PROBE_IMAGE
+              value: "fft-probe:0.1"
             - name: JOB_NAMESPACE
               value: "default"
             - name: PEAK_FLOPS_GFLOPS
