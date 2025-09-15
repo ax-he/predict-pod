@@ -12,6 +12,10 @@ A predictor demo for forecasting resource overhead of prediction tasks
 
 可以识别用户上传的GEMM计算任务所需资源开销
 
+### V2.x
+
+可以识别用户上传的FFT计算任务所需资源开销
+
 ## 部署
 
 **部署k3d集群**
@@ -28,7 +32,7 @@ k3d cluster create myk3s
 
 **检查docker镜像中是否有指定内容**
 
-`docker run --rm -it pred-svc:2.1 bash -lc "cat /app/listen.py | grep '# 9.15 v2.1 test'"  # 例如查找listen.py中是否含有“# 9.15 v2.1 test”内容`
+`docker run --rm -it pred-svc:2.1 bash -lc "cat /app/listen.py | grep '# 9.15 v2.1 test'"`  # 例如查找listen.py中是否含有“# 9.15 v2.1 test”内容
 
 **检查docker镜像中是否含有探针.so**
 
@@ -36,12 +40,12 @@ k3d cluster create myk3s
 
 **在本地测试镜像中的探针是否能使用**
 
-`docker run --rm -it -v $(pwd):/work fft-probe:0.1 bash -lc "`
-  `cd /work && \`
-  `gcc -O2 fft_test.c -o fft_test -lfftw3 -lfftw3f -lm && \`
-  `TIME_BUDGETS='0.02,0.05' IO_FACTOR=2.0 \`
-  `LD_PRELOAD=/opt/probe/lib/libfftprobe.so ./fft_test`
-`"`
+`docker run --rm -it -v $(pwd):/work fft-probe:0.1 bash -lc "
+  cd /work && \
+  gcc -O2 fft_test.c -o fft_test -lfftw3 -lfftw3f -lm && \
+  TIME_BUDGETS='0.02,0.05' IO_FACTOR=2.0 \
+  LD_PRELOAD=/opt/probe/lib/libfftprobe.so ./fft_test
+"`
 
 **加载到k3d中**
 
