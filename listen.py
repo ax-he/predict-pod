@@ -1,11 +1,11 @@
 # ~/pred-svc/listen.py
-# 9.12 v0.8 test
+# 9.15 v2.1 test
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Literal, Optional, List, Dict, Any
-import math, os, subprocess, json, tempfile, re, uuid, time
+import math, os, subprocess, json, tempfile, re, uuid, time, base64
 
-app = FastAPI(title="pred-svc", version="0.7")
+app = FastAPI(title="pred-svc", version="0.8")
 
 # ---------- 读机器峰值（来自环境变量 / ConfigMap） ----------
 def getenv_float(name: str, default: float) -> float:
@@ -15,12 +15,12 @@ def getenv_float(name: str, default: float) -> float:
     except Exception:
         return default
 
-PEAK_FLOPS_GFLOPS = getenv_float("PEAK_FLOPS_GFLOPS", 50.0)      # 例：50 GFLOPS
+PEAK_FLOPS_GFLOPS = getenv_float("PEAK_FLOPS_GFLOPS", 50.0)            # 例：50 GFLOPS
 PEAK_MEM_BANDWIDTH_GBS = getenv_float("PEAK_MEM_BANDWIDTH_GBS", 15.0)  # 例：15 GB/s
-LOCAL_TIME_BUDGET_S = getenv_float("LOCAL_TIME_BUDGET_S", 10.0)  # 默认本地预算 10s
+LOCAL_TIME_BUDGET_S = getenv_float("LOCAL_TIME_BUDGET_S", 10.0)        # 默认本地预算 10s
 
-PEAK_FLOPS = PEAK_FLOPS_GFLOPS * 1e9              # FLOPs/s
-PEAK_BW    = PEAK_MEM_BANDWIDTH_GBS * (1024**3)   # Bytes/s（按GiB/s）
+PEAK_FLOPS = PEAK_FLOPS_GFLOPS * 1e9            # FLOPs/s
+PEAK_BW    = PEAK_MEM_BANDWIDTH_GBS * (1024**3) # Bytes/s（按GiB/s）
 
 # ---------- 请求/响应模型 ----------
 DType = Literal["float16", "float32", "float64", "int8"]
@@ -44,7 +44,7 @@ class TranscodeSpec(BaseModel):
     preset: Optional[str] = None
 
 class Kernel(BaseModel):
-    type: Literal["gemm", "fft1d", "transcode"]
+    type: Literal["gemm", "fft1d", "transcode", "fft_c"]
     params: Dict[str, Any]
     flops: float
     bytes: float
@@ -361,7 +361,7 @@ def _read_flag(args: List[str], names: List[str]) -> Optional[str]:
 
 def _get_from_env(env: Dict[str, str], keys: List[str]) -> Optional[str]:
     for k in keys:
-        if k in env and env[k]:
+        if k in env and k is not None and env[k]:
             return env[k]
     return None
 
@@ -448,6 +448,7 @@ def predict_fft_from_pod(
 # ========= 通过 K8s Job + LD_PRELOAD 探针从 .c 源码抓 GEMM =========
 
 BLAS_PROBE_IMAGE = os.getenv("BLAS_PROBE_IMAGE", "blas-probe:0.3")
+FFT_PROBE_IMAGE  = os.getenv("FFT_PROBE_IMAGE",  "fft-probe:0.1")
 JOB_NAMESPACE = os.getenv("JOB_NAMESPACE", "default")
 
 # 兼容老版 [max] 行
@@ -458,6 +459,10 @@ GEMM_LOG_RE = re.compile(
 # 新版 TOTAL/MAX 行
 GEMM_TOTAL_LOG_RE = re.compile(r"\[probe\].*TOTAL:.*FLOPs=([0-9.]+).*Bytes=([0-9.]+)", re.IGNORECASE)
 GEMM_MAX_LOG_RE   = re.compile(r"\[probe\].*MAX:.*M=(\d+)\s+N=(\d+)\s+K=(\d+).*FLOPs=([0-9.]+).*Bytes=([0-9.]+)", re.IGNORECASE)
+
+# FFT 汇总行样例：
+# [fftprobe] mode=TOTAL calls=4  TOTAL: FLOPs=36126720  Bytes=12976128
+FFT_SUMMARY_RE = re.compile(r"\[fftprobe\]\s+mode=\w+.*FLOPs=([0-9\.]+)\s+Bytes=([0-9\.]+)", re.IGNORECASE)
 
 def _k8s_clients():
     try:
@@ -496,7 +501,7 @@ def _await_job_done(v1, batch, namespace: str, job_name: str, timeout_s: int = 9
         time.sleep(1.0)
     raise HTTPException(status_code=504, detail="job not completed in time")
 
-def _cleanup_job_and_cm(batch, v1, namespace: str, job_name: str, cm_name: str):
+def _cleanup_job_and_cm(batch, v1, namespace: str, job_name: str, cm_name: Optional[str]):
     if os.getenv("KEEP_PROBE_JOB", "0") == "1":
         return
     try:
@@ -505,10 +510,11 @@ def _cleanup_job_and_cm(batch, v1, namespace: str, job_name: str, cm_name: str):
         batch.delete_namespaced_job(name=job_name, namespace=namespace, body=propagation)
     except Exception:
         pass
-    try:
-        v1.delete_namespaced_config_map(cm_name, namespace)
-    except Exception:
-        pass
+    if cm_name:
+        try:
+            v1.delete_namespaced_config_map(cm_name, namespace)
+        except Exception:
+            pass
 
 def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespace: str = JOB_NAMESPACE) -> tuple[int, int, int]:
     """创建 ConfigMap + Job，编译并 LD_PRELOAD 运行，读日志解析 M/N/K（兼容 TOTAL/MAX/旧版输出）。"""
@@ -526,7 +532,7 @@ def _create_job_with_cm_and_run(src_c_text: str, time_limit_s: int = 60, namespa
     cm = V1ConfigMap(metadata=V1ObjectMeta(name=cm_name), data={"user.c": src_c_text})
     v1.create_namespaced_config_map(namespace, cm)
 
-    # 2) 创建 Job：容器内编译 + 运行 + 打印日志
+    # 2) 创建 Job：容器内编译 + 运行 + 打印日志（GEMM）
     from kubernetes.client import (
         V1Job, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Container,
         V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, V1ObjectMeta
@@ -669,4 +675,154 @@ async def predict_gemm_from_c_upload(
     resp = decide_and_pack([kernel], time_budget_s)
     out = resp.model_dump()
     out["inferred"] = {"M": M, "N": N, "K": K, "source": "LD_PRELOAD via blas-probe job"}
+    return out
+
+
+# ========= 通过 K8s Job + LD_PRELOAD 探针从 .c 源码抓 FFT =========
+
+def _create_fft_job_with_cm_and_run(
+    src_c_text: str,
+    time_limit_s: int = 90,
+    namespace: str = JOB_NAMESPACE,
+    time_budgets: Optional[str] = None,
+    io_factor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    创建 ConfigMap + Job（FFT 版），容器内编译 + 运行带 libfftprobe 的二进制，返回解析结果：
+      返回 dict: { "logs": "...", "flops_total": float, "bytes_total": float }
+    """
+    if len(src_c_text.encode("utf-8")) > 900 * 1024:
+        raise HTTPException(status_code=413, detail="C source too large for ConfigMap (~1MiB limit)")
+
+    client, v1, batch = _k8s_clients()
+
+    uniq = uuid.uuid4().hex[:8]
+    cm_name = f"fft-csrc-{uniq}"
+    job_name = f"fft-probe-{uniq}"
+
+    from kubernetes.client import V1ObjectMeta, V1ConfigMap
+    cm = V1ConfigMap(metadata=V1ObjectMeta(name=cm_name), data={"user.c": src_c_text})
+    v1.create_namespaced_config_map(namespace, cm)
+
+    from kubernetes.client import (
+        V1Job, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Container,
+        V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, V1ObjectMeta, V1EnvVar
+    )
+
+    # 用 base64 写入 /work/main.c，避免转义问题
+    enc = base64.b64encode(src_c_text.encode("utf-8")).decode("ascii")
+    write_cmd = f"mkdir -p /work && echo '{enc}' | base64 -d > /work/main.c"
+
+    # 编译 + 运行（FFTW3 & FFTW3F）
+    compile_cmd = "gcc -O2 /work/main.c -o /work/main -lfftw3 -lfftw3f"
+    run_cmd = "LD_PRELOAD=/opt/probe/lib/libfftprobe.so /work/main || true"
+    shell = f"""
+set -euo pipefail
+{write_cmd}
+echo "[fft-probe-job] === compile ==="
+{compile_cmd}
+echo "[fft-probe-job] ldd /work/main:"; ldd /work/main || true
+echo "[fft-probe-job] === run (LD_PRELOAD) ==="
+{run_cmd}
+"""
+
+    envs = []
+    # 透传峰值（探针内部也会 getenv）
+    for k in ["PEAK_FLOPS_GFLOPS","PEAK_MEM_BANDWIDTH_GBS"]:
+        v = os.environ.get(k)
+        if v:
+            envs.append(V1EnvVar(name=k, value=v))
+    # 传递 TIME_BUDGETS/IO_FACTOR（可选）
+    if time_budgets:
+        envs.append(V1EnvVar(name="TIME_BUDGETS", value=str(time_budgets)))
+    if io_factor:
+        envs.append(V1EnvVar(name="IO_FACTOR", value=str(io_factor)))
+
+    cmd = ["/bin/sh", "-lc", shell]
+
+    container = V1Container(
+        name="runner",
+        image=FFT_PROBE_IMAGE,
+        command=cmd[:2],
+        args=[cmd[2]],
+        env=envs,
+        volume_mounts=[
+            V1VolumeMount(name="code", mount_path="/code"),
+            V1VolumeMount(name="work", mount_path="/work"),
+        ],
+        resources=None,
+    )
+
+    pod_spec = V1PodSpec(
+        restart_policy="Never",
+        containers=[container],
+        volumes=[
+            V1Volume(name="code", config_map=V1ConfigMapVolumeSource(name=cm_name, items=[{"key": "user.c", "path": "user.c"}])),
+            V1Volume(name="work", empty_dir={}),
+        ],
+    )
+
+    job = V1Job(
+        metadata=V1ObjectMeta(name=job_name),
+        spec=V1JobSpec(
+            ttl_seconds_after_finished=60,
+            backoff_limit=0,
+            template=V1PodTemplateSpec(
+                metadata=V1ObjectMeta(labels={"app": "fft-probe", "job-name": job_name}),
+                spec=pod_spec,
+            ),
+        ),
+    )
+
+    batch.create_namespaced_job(namespace, job)
+
+    logs = ""
+    try:
+        pod_name = _await_job_done(v1, batch, namespace, job_name, timeout_s=time_limit_s)
+        logs = v1.read_namespaced_pod_log(name=pod_name, namespace=namespace) or ""
+    finally:
+        _cleanup_job_and_cm(batch, v1, namespace, job_name, cm_name)
+
+    # 解析 libfftprobe 汇总行
+    m = FFT_SUMMARY_RE.search(logs)
+    if not m:
+        raise HTTPException(status_code=422, detail=f"failed to parse FFT totals from logs:\n{logs[:800] if logs else 'NO LOGS'}")
+    flops_total = float(m.group(1))
+    bytes_total = float(m.group(2))
+    return {"logs": logs, "flops_total": flops_total, "bytes_total": bytes_total}
+
+@app.post("/predict/fft/from_c_upload", response_model=PredictResponse)
+async def predict_fft_from_c_upload(
+    time_budget_s: float = Form(...),
+    file: UploadFile = File(...),
+    namespace: str = Form(JOB_NAMESPACE),
+    time_budgets: Optional[str] = Form(None),  # 传给探针的 TIME_BUDGETS
+    io_factor: Optional[float] = Form(None),   # 传给探针的 IO_FACTOR
+):
+    # 读取上传 C 源码
+    try:
+        src = (await file.read()).decode("utf-8", errors="ignore")
+    finally:
+        await file.close()
+
+    res = _create_fft_job_with_cm_and_run(
+        src_c_text=src,
+        time_limit_s=120,
+        namespace=namespace,
+        time_budgets=time_budgets,
+        io_factor=(str(io_factor) if io_factor is not None else None),
+    )
+    flops = float(res["flops_total"])
+    bytes_ = float(res["bytes_total"])
+    t = max(flops / PEAK_FLOPS, bytes_ / PEAK_BW)
+
+    kernel = Kernel(
+        type="fft_c",
+        params={"source": "LD_PRELOAD via fft-probe job", "time_budgets": time_budgets, "io_factor": io_factor},
+        flops=flops, bytes=bytes_, t_lower_bound_s=t
+    )
+    resp = decide_and_pack([kernel], time_budget_s)
+    out = resp.model_dump()
+    out["parsed"] = {"flops_total": flops, "bytes_total": bytes_}
+    out["logs_tail"] = res["logs"].splitlines()[-50:]
     return out
