@@ -26,6 +26,23 @@ docker build -f Dockerfile.probe -t blas-probe:0.3 ./ldpreload/gemm
 
 docker build -f Dockerfile.probe -t fft-probe:0.1 ./ldpreload/fft
 
+**检查docker镜像中是否有指定内容**
+
+docker run --rm -it pred-svc:2.1 bash -lc "cat /app/listen.py | grep '# 9.15 v2.1 test'"  # 例如查找listen.py中是否含有“# 9.15 v2.1 test”内容
+
+**检查docker镜像中是否含有探针.so**
+
+docker run --rm -it fft-probe:0.1 bash -lc 'ls -l /opt/probe/lib && ldd /opt/probe/lib/libfftprobe.so || true'
+
+**在本地测试镜像中的探针是否能使用**
+
+docker run --rm -it -v $(pwd):/work fft-probe:0.1 bash -lc "
+  cd /work && \
+  gcc -O2 fft_test.c -o fft_test -lfftw3 -lfftw3f -lm && \
+  TIME_BUDGETS='0.02,0.05' IO_FACTOR=2.0 \
+  LD_PRELOAD=/opt/probe/lib/libfftprobe.so ./fft_test
+"
+
 **加载到k3d中**
 
 k3d image import pred-svc:2.1 -c myk3s
