@@ -17,7 +17,7 @@
 
 /* ----- 总/最大 两种聚合模式：默认 TOTAL，可用 -DPROBE_MODE_MAX 覆盖 ----- */
 #if !defined(PROBE_MODE_MAX) && !defined(PROBE_MODE_TOTAL)
-#  define PROBE_MODE_TOTAL 1
+#  define PROBE_MODE_MAX 1
 #endif
 
 /* ----- 默认 DRY-RUN 打开；可用 -DPROBE_DRY_RUN=0 或运行时环境覆盖 ----- */
