@@ -1,0 +1,28 @@
+# Dockerfile.probe —— 含编译链 + FFTW3 + 探针 .so（TOTAL + DRY-RUN）
+FROM mirror.gcr.io/library/python:3.11-slim
+
+RUN set -eux; \
+  if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
+  fi; \
+  if [ -f /etc/apt/sources.list ]; then \
+    sed -i 's|http://|https://|g' /etc/apt/sources.list; \
+  fi; \
+  apt-get update; \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential ca-certificates pkg-config \
+    libfftw3-dev; \
+  rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/probe/src
+# 请把你的 libfftprobe.c 放到构建上下文同级目录
+COPY libfftprobe.c .
+
+# 编译为 TOTAL + DRY-RUN，并把 .so 放到 /opt/probe/lib/libfftprobe.so
+RUN mkdir -p /opt/probe/lib && \
+    gcc -O2 -fPIC -shared -o /opt/probe/lib/libfftprobe.so \
+        libfftprobe.c -ldl -lpthread -lfftw3 -lfftw3f \
+        -DPROBE_MODE_TOTAL -DPROBE_DRY_RUN
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+CMD ["/bin/sh", "-lc", "echo 'fft-probe ready (TOTAL+DRYRUN)'; sleep infinity"]
