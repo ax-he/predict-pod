@@ -210,8 +210,8 @@ static void summarize_and_decide(void){
     double BYTES = (double)fft_bytes(gM,gN,gK,g_dtype_bytes);
     const char* mode = "MAX";
 #endif
-    double peak_gflops = env_double("PEAK_GFLOPS", 100.0);
-    double mem_bw_gbs  = env_double("MEM_BW_GBS",   40.0);
+    double peak_gflops = env_double("PEAK_GFLOPS", 250.91);
+    double mem_bw_gbs  = env_double("MEM_BW_GBS",   14.53);
 
     const char* s_mode = getenv(
     #if defined(PROBE_MODE_TOTAL)
