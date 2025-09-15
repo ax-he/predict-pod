@@ -20,15 +20,19 @@ k3d cluster create myk3s
 
 **构建本地镜像**
 
-docker build -t pred-svc:0.8 .
+docker build -t pred-svc:2.1 .
 
-docker build -t blas-probe:0.3 ./ldpreload
+docker build -f Dockerfile.probe -t blas-probe:0.3 ./ldpreload/gemm
+
+docker build -f Dockerfile.probe -t fft-probe:0.1 ./ldpreload/fft
 
 **加载到k3d中**
 
-k3d image import pred-svc:0.8 -c myk3s
+k3d image import pred-svc:2.1 -c myk3s
 
 k3d image import blas-probe:0.3 -c myk3s
+
+k3d image import fft-probe:0.1 -c myk3s
 
 
 **创建RBAC（第一次必须做，后续RBAC文件有改动时也要）**
@@ -37,13 +41,13 @@ kubectl apply -f rbac-pred-svc-reader.yaml -n default
 
 **部署应用配置**
 
-A`)` apply更新
+A`)` apply更新 (推荐)
 
 kubectl apply -f pred-svc.yaml -n default
 
 B`)` 保持YAML不变，切换运行的Deployment
 
-kubectl -n default set image deploy/pred-svc pred-svc=pred-svc:0.8
+kubectl -n default set image deploy/pred-svc pred-svc=pred-svc:2.1
 
 **查看滚动发布状态**
 
@@ -85,4 +89,8 @@ curl -fsS -X POST   -F "time_budget_s=20000"   -F "file=@/home/haga/NDSS.mp4;typ
 
 **GEMM算力任务触发**
 
-curl -s -F time_budget_s=0.1 -F file=@/home/haga/pred-svc/test/complex_gemm.c   http://127.0.0.1:8080/predict/gemm/from_c_upload | jq .
+curl -s -F time_budget_s=0.1 -F file=@/home/haga/pred-svc/test/gemm/complex_gemm.c   http://127.0.0.1:8080/predict/gemm/from_c_upload | jq .
+
+**FFT算力任务触发**
+
+curl -s -F time_budget_s=0.001 -F file=@/home/haga/pred-svc/ldpreload/fft/fft_test.c   http://127.0.0.1:8080/predict/fft/from_c_upload | jq .
