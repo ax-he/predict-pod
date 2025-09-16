@@ -1,0 +1,1 @@
+gcc -O2 -fPIC -shared -o libprobe.so libprobe_crypto.c -ldl -pthread
