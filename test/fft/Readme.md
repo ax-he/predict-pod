@@ -13,6 +13,8 @@ export IO_FACTOR=2.0          # 估算 IO 流量系数，按需调整
 
 LD_PRELOAD=./libfftprobe.so ./fft_test
 
+TIME_BUDGETS="0.02,0.05" LD_PRELOAD=./libfftprobe.so ./fft_test
+
 **3) 真正执行 FFT（关闭 DRY-RUN）**
 make clean && make DRYRUN=0
 
