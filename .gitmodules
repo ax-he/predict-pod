@@ -1,0 +1,4 @@
+[submodule "test/perf-audit/WSL2-Linux-Kernel"]
+	path = test/perf-audit/WSL2-Linux-Kernel
+	url = https://github.com/microsoft/WSL2-Linux-Kernel.git
+	branch = linux-msft-wsl-6.6.y
