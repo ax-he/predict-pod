@@ -1,0 +1,32 @@
+machine:
+  peak_gflops: 50.906
+  mem_bw_gbs: 14.53
+
+costs:
+  cpb_sha256: 12.0
+  cpb_aes128: 7.0
+
+catalog:
+  # OpenSSL 3：按地址 attach，长度参数是第2个（len）
+  - cat: sha2
+    attach:
+      - { lib: libcrypto, sym: SHA256_Update, len_arg: 2 }
+
+  - cat: cmac
+    attach:
+      - { lib: libcrypto, sym: CMAC_Update,   len_arg: 2 }
+
+  # OpenBLAS：M/N/K 分别是第4/5/6个参数（x86-64，RowMajor）
+  - cat: gemm
+    attach:
+      - { lib: openblas, sym: cblas_dgemm, M: 4, N: 5, K: 6 }
+      - { lib: openblas, sym: cblas_sgemm, M: 4, N: 5, K: 6 }
+
+  # glibc：先钩 memmove（比 memcpy 更稳定；需要时可再换成 memcpy@@GLIBC_2.14 等）
+  - cat: memcpy
+    attach:
+      - { lib: libc, sym: memmove, len_arg: 3 }
+
+  # I/O tracepoints
+  - cat: io
+    tracepoints: [ sys_enter_read, sys_enter_write ]
