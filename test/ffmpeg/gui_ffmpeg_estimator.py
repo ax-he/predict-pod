@@ -8,6 +8,12 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# >>> NEW: extra imports (append-only)
+import time
+import datetime
+import pathlib
+# <<< NEW
+
 # ---------- Defaults ----------
 SAFETY = 1.25
 SAMPLE_SECS = 10
@@ -48,6 +54,11 @@ def pretty_time(t_seconds):
         return f"{m}m {s}s"
     else:
         return f"{s}s"
+
+# >>> NEW: helper to print wall-clock timestamps
+def now_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# <<< NEW
 
 # ---------- ffprobe / sampling / estimation ----------
 def ffprobe_info(path):
@@ -303,6 +314,10 @@ class App(tk.Tk):
         self.title("FFmpeg ETA Helper (10 function groups included)")
         self.geometry("900x640")
 
+        # >>> NEW: to store last ETA for comparison
+        self.last_eta_s = None
+        # <<< NEW
+
         # Top: input file
         top = ttk.Frame(self); top.pack(fill="x", padx=12, pady=8)
         ttk.Label(top, text="Input video:").grid(row=0, column=0, sticky="w")
@@ -385,6 +400,11 @@ class App(tk.Tk):
         ttk.Button(btnf, text="1) Probe (ffprobe)", command=self.on_probe).pack(side="left", padx=4)
         ttk.Button(btnf, text="2) Sample & Estimate", command=self.on_estimate).pack(side="left", padx=4)
         ttk.Button(btnf, text="Clear Output", command=lambda: self.txt.delete("1.0","end")).pack(side="left", padx=4)
+
+        # >>> NEW: two extra action buttons
+        ttk.Button(btnf, text="3) Run Locally", command=self.on_run_local).pack(side="left", padx=4)
+        ttk.Button(btnf, text="4) Upload & Run (remote)", command=self.on_run_remote_stub).pack(side="left", padx=4)
+        # <<< NEW
 
         # Output
         outf = ttk.LabelFrame(self, text="Output")
@@ -506,17 +526,10 @@ class App(tk.Tk):
                 if trim_prefix: sample_cmd = ["ffmpeg"] + trim_prefix + ["-t", str(P["sample_secs"])]
                 sample_cmd += ["-i", path]
 
-                extra_inputs = []
                 if op == "4) Overlay Watermark (PNG at 10,10)" and P["overlay"]:
-                    # Real command would have: -i overlay.png -filter_complex "overlay=10:10"
-                    # We already put overlay=10:10 in -vf; must add the image as input
                     sample_cmd = sample_cmd[:-3] + ["-i", P["overlay"]] + sample_cmd[-3:]
                 if op == "6) Soft Subtitles (mov_text)" and P["subs"]:
-                    # Sampling to null cannot mux subs; but add as input to approximate small overhead
                     sample_cmd = sample_cmd[:-3] + ["-i", P["subs"]] + sample_cmd[-3:]
-                if op == "6) Hard Subtitles (burn-in)" and P["subs"]:
-                    # already handled via -vf subtitles=path
-                    pass
 
                 full_cmd = sample_cmd + pipeline + ["-f","null","-","-v","quiet","-stats"]
                 self.log("Sample command snippet:")
@@ -525,6 +538,10 @@ class App(tk.Tk):
                 # Actually run sampling (single pass). For two-pass we’ll multiply by 2 later.
                 sp = run_sample(path, pipeline, info["duration"], P["sample_secs"], op_name=op)
                 t_total = estimate_total_seconds(info["duration"], sp, P["safety"], op_name=op)
+
+                # >>> NEW: remember ETA for comparison after real run
+                self.last_eta_s = t_total
+                # <<< NEW
 
                 self.log(f"Sample speed ≈ {sp:.2f}x (real-time multiplier)")
                 self.log(f"Video duration ≈ {pretty_time(info['duration'])}")
@@ -536,6 +553,180 @@ class App(tk.Tk):
                 self.log(f"[estimate error] {e}")
 
         threading.Thread(target=work, daemon=True).start()
+
+    # >>> NEW: choose output path by op
+    def _choose_output_path(self, input_path, op):
+        stem = pathlib.Path(input_path).stem
+        parent = pathlib.Path(input_path).parent
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if op == "1) Remux (No Re-encode)":
+            ext = ".mp4"
+        elif op == "7) GIF (fps=10, width=480)":
+            ext = ".gif"
+        elif op == "7) Thumbnail Grid (fps=1, 5x4)":
+            ext = ".jpg"
+        elif op == "9) HLS VOD Segments":
+            ext = ".m3u8"
+        else:
+            ext = ".mp4"
+        out = parent / f"{stem}_out_{ts}{ext}"
+        return str(out)
+    # <<< NEW
+
+    # >>> NEW: build real ffmpeg command for actual run
+    def _build_real_run_cmd(self, input_path, output_path, op, P):
+        base = ["ffmpeg","-y"]
+
+        # Fast trim: -ss/-to before -i
+        if op.startswith("2) Fast Trim") and P["ss"]:
+            base += ["-ss", P["ss"]]
+        if op.startswith("2) Fast Trim") and P["to"]:
+            base += ["-to", P["to"]]
+
+        inputs = ["-i", input_path]
+
+        # Extra inputs
+        if op == "4) Overlay Watermark (PNG at 10,10)":
+            if not P["overlay"]:
+                raise RuntimeError("Overlay PNG required for overlay operation.")
+            inputs = ["-i", input_path, "-i", P["overlay"]]
+        if op == "6) Soft Subtitles (mov_text)":
+            if not P["subs"]:
+                raise RuntimeError("Subtitles .srt required for soft subtitles.")
+            inputs = ["-i", input_path, "-i", P["subs"]]
+
+        after_inputs = []
+        if op.startswith("2) Precise Trim"):
+            if P["ss"]: after_inputs += ["-ss", P["ss"]]
+            if P["to"]: after_inputs += ["-to", P["to"]]
+
+        pipeline = build_pipeline_args(op, P)
+
+        # Special mapping
+        if op == "6) Soft Subtitles (mov_text)":
+            pipeline = ["-c:v","copy","-c:a","copy","-c:s","mov_text","-map","0","-map","1:0"]
+
+        if op == "7) Thumbnail Grid (fps=1, 5x4)":
+            pipeline += ["-frames:v","1"]
+
+        if op == "9) HLS VOD Segments":
+            pipeline += ["-hls_time", P["hls_time"] or "6", "-hls_playlist_type","vod"]
+
+        cmd = base + inputs + after_inputs + pipeline + [output_path]
+        return cmd
+    # <<< NEW
+
+    # >>> NEW: run locally and compare with ETA
+    def on_run_local(self):
+        input_path = self.in_path.get().strip()
+        if not input_path:
+            return messagebox.showinfo("Info","Please select an input video file first.")
+        op = self.op_var.get()
+        P = self.gather_params()
+
+        if op == "9) RTMP Live Stream" and not P["rtmp_url"]:
+            return messagebox.showinfo("Info","Please fill RTMP URL before running live stream.")
+        if op.startswith("10) "):
+            return messagebox.showinfo("Info","Screen/Device capture is not supported in this file-based runner.")
+
+        out_path = self._choose_output_path(input_path, op)
+        # For HLS create folder
+        if op == "9) HLS VOD Segments":
+            folder = pathlib.Path(out_path).with_suffix("")
+            folder.mkdir(parents=True, exist_ok=True)
+            out_path = str(folder / "index.m3u8")
+
+        def work():
+            try:
+                self.log(f"=== Run Locally: {op} ===")
+                self.log(f"Start time: {now_str()}")
+                t0 = time.time()
+
+                cmd = self._build_real_run_cmd(input_path, out_path, op, P)
+                if op == "9) RTMP Live Stream":
+                    # stream to RTMP
+                    cmd = ["ffmpeg","-re","-i", input_path] + build_pipeline_args(op, P) + ["-f","flv", P["rtmp_url"]]
+
+                self.log("Command:")
+                self.log("  " + " ".join(shlex.quote(x) for x in cmd[:40]) + (" ..." if len(cmd) > 40 else ""))
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                while True:
+                    line = proc.stderr.readline()
+                    if not line:
+                        break
+                    if "time=" in line or "speed=" in line:
+                        self.log(line.strip())
+                code = proc.wait()
+
+                t1 = time.time()
+                elapsed = t1 - t0
+                if code != 0:
+                    self.log(f"[run error] ffmpeg exited with code {code}")
+                else:
+                    self.log(f"Output file: {out_path}")
+
+                self.log(f"Finish time: {now_str()}")
+                self.log(f"Elapsed: {pretty_time(elapsed)}  (≈ {elapsed:.1f} s)")
+
+                if self.last_eta_s is not None:
+                    diff = elapsed - self.last_eta_s
+                    pct = (diff / self.last_eta_s) * 100.0
+                    self.log(f"ETA comparison: estimated {pretty_time(self.last_eta_s)}  → actual {pretty_time(elapsed)}  ({diff:+.1f}s, {pct:+.1f}%)")
+
+                self.log("-"*60)
+            except Exception as e:
+                self.log(f"[run error] {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+    # <<< NEW
+
+    # >>> NEW: remote stub (prints SCP/SSH plan only)
+    def on_run_remote_stub(self):
+        input_path = self.in_path.get().strip()
+        if not input_path:
+            return messagebox.showinfo("Info","Please select an input video file first.")
+        op = self.op_var.get()
+        P = self.gather_params()
+
+        REMOTE = ""      # e.g., "user@server"
+        REMOTE_DIR = ""  # e.g., "/tmp/ffjobs"
+
+        def work():
+            try:
+                self.log("=== Upload & Run (remote) — STUB ===")
+                self.log(f"Plan start: {now_str()}")
+                # Build a remote-side command preview
+                try:
+                    preview_cmd = self._build_real_run_cmd("/path/on/remote/input.mp4",
+                                                           "/path/on/remote/output.mp4", op, P)
+                except Exception as e:
+                    self.log(f"[plan error] {e}")
+                    return
+
+                self.log("Remote server not configured yet. Typical steps when ready:")
+                self.log("  1) Upload input:")
+                self.log("     scp <LOCAL_INPUT>  REMOTE:REMOTE_DIR/input.mp4")
+                if op == "4) Overlay Watermark (PNG at 10,10)" and P['overlay']:
+                    self.log("     scp <overlay.png> REMOTE:REMOTE_DIR/overlay.png")
+                if op.startswith("6)") and P['subs']:
+                    self.log("     scp <subs.srt>    REMOTE:REMOTE_DIR/subs.srt")
+                self.log("  2) Execute remotely:")
+                self.log("     ssh REMOTE 'cd REMOTE_DIR && " +
+                         " ".join(shlex.quote(x) for x in preview_cmd) + "'")
+                self.log("  3) Download result:")
+                self.log("     scp REMOTE:REMOTE_DIR/output.*  <LOCAL_DIR>/")
+                self.log("Fill REMOTE / REMOTE_DIR later.")
+
+                self.log(f"Plan finish: {now_str()}")
+                if self.last_eta_s is not None:
+                    self.log(f"[Reference] Last local ETA: {pretty_time(self.last_eta_s)}")
+                self.log("-"*60)
+            except Exception as e:
+                self.log(f"[remote plan error] {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+    # <<< NEW
 
 if __name__ == "__main__":
     App().mainloop()
