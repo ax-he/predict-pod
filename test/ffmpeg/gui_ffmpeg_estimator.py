@@ -397,14 +397,13 @@ class App(tk.Tk):
 
         # Buttons
         btnf = ttk.Frame(self); btnf.pack(fill="x", padx=12, pady=4)
-        ttk.Button(btnf, text="1) Probe (ffprobe)", command=self.on_probe).pack(side="left", padx=4)
-        ttk.Button(btnf, text="2) Sample & Estimate", command=self.on_estimate).pack(side="left", padx=4)
-        ttk.Button(btnf, text="Clear Output", command=lambda: self.txt.delete("1.0","end")).pack(side="left", padx=4)
-
+        ttk.Button(btnf, text="(1) Probe (ffprobe)", command=self.on_probe).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(2) Sample & Estimate", command=self.on_estimate).pack(side="left", padx=4)
         # >>> NEW: two extra action buttons
-        ttk.Button(btnf, text="3) Run Locally", command=self.on_run_local).pack(side="left", padx=4)
-        ttk.Button(btnf, text="4) Upload & Run (remote)", command=self.on_run_remote_stub).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(3) Run Locally", command=self.on_run_local).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(4) Upload & Run (remote)", command=self.on_run_remote_stub).pack(side="left", padx=4)
         # <<< NEW
+        ttk.Button(btnf, text="Clear Output", command=lambda: self.txt.delete("1.0","end")).pack(side="left", padx=4)
 
         # Output
         outf = ttk.LabelFrame(self, text="Output")
@@ -689,6 +688,7 @@ class App(tk.Tk):
         op = self.op_var.get()
         P = self.gather_params()
 
+        # Configuration (fill in later)
         REMOTE = ""      # e.g., "user@server"
         REMOTE_DIR = ""  # e.g., "/tmp/ffjobs"
 
