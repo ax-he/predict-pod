@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>FFmpeg ETA Web</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, "PingFang SC","Noto Sans CJK SC","Microsoft YaHei", sans-serif; margin:20px; }
+  fieldset { margin-bottom:14px; }
+  label { display:inline-block; width:180px; vertical-align:top; }
+  input[type="text"], input[type="number"] { width:220px; }
+  select { width:420px; }
+  textarea { width:100%; height:200px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  .row { margin:6px 0; }
+  .btn { margin-right:8px; padding:6px 10px; }
+  .hint { color:#666; font-size:12px; }
+</style>
+</head>
+<body>
+<h2>FFmpeg ETA Web</h2>
+
+<div class="row">
+  <label>后端地址：</label>
+  <input id="baseUrl" type="text" value="http://localhost:8000" />
+</div>
+
+<fieldset>
+<legend>1) 上传视频</legend>
+<div class="row">
+  <input id="fileInput" type="file" />
+  <button class="btn" onclick="upload()">上传</button>
+  <span id="fileIdSpan" class="hint"></span>
+</div>
+</fieldset>
+
+<fieldset>
+<legend>2) 操作与参数</legend>
+
+<div class="row">
+  <label>Operation：</label>
+  <select id="operation"></select>
+</div>
+
+<div class="row"><label>CRF：</label><input id="crf" type="number" value="23" /></div>
+<div class="row"><label>preset：</label>
+  <select id="preset">
+    <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+    <option>faster</option><option>fast</option><option selected>medium</option>
+    <option>slow</option><option>slower</option><option>veryslow</option>
+  </select>
+</div>
+
+<div class="row"><label>Target Width：</label><input id="target_w" type="number" /></div>
+<div class="row"><label>Target Height：</label><input id="target_h" type="number" /></div>
+<div class="row"><label>Output FPS：</label><input id="fps_out" type="number" /></div>
+<div class="row"><label>Bitrate (kbps, 2-pass)：</label><input id="bitrate_k" type="number" value="4000" /></div>
+
+<div class="row"><label>Start -ss (00:00:10)：</label><input id="ss" type="text" /></div>
+<div class="row"><label>End -to (00:00:20)：</label><input id="to" type="text" /></div>
+
+<div class="row"><label>Overlay PNG 路径：</label><input id="overlay" type="text" placeholder="/path/overlay.png" /></div>
+<div class="row"><label>Subtitles (.srt) 路径：</label><input id="subs" type="text" placeholder="/path/subs.srt" /></div>
+
+<div class="row"><label>RTMP URL：</label><input id="rtmp_url" type="text" placeholder="rtmp://server/live/streamkey" /></div>
+<div class="row"><label>HLS segment time (s)：</label><input id="hls_time" type="number" value="6" /></div>
+
+</fieldset>
+
+<fieldset>
+<legend>3) 估时参数</legend>
+<div class="row"><label>Safety factor：</label><input id="safety" type="number" step="0.05" value="1.25" /></div>
+<div class="row"><label>Sample seconds：</label><input id="sample_secs" type="number" value="10" /></div>
+</fieldset>
+
+<div class="row">
+  <button class="btn" onclick="probe()">(1) Probe (ffprobe)</button>
+  <button class="btn" onclick="estimate()">(2) Sample & Estimate</button>
+  <button class="btn" onclick="runLocal()">(3) Run Locally</button>
+  <button class="btn" onclick="runRemote()">(4) Upload & Run (remote)</button>
+  <button class="btn" onclick="clearOutput()">清空输出</button>
+</div>
+
+<fieldset>
+<legend>Output</legend>
+<textarea id="output" readonly></textarea>
+</fieldset>
+
+<script>
+const OPS = [
+  "1) H.264 CRF Transcode",
+  "1) H.265 CRF Transcode (Slow)",
+  "1) Remux (No Re-encode)",
+  "2) Fast Trim (no re-encode, keyframe aligned)",
+  "2) Precise Trim (re-encode)",
+  "3) Scale+FPS (CRF quality)",
+  "3) Two-pass Target Bitrate",
+  "4) Overlay Watermark (PNG at 10,10)",
+  "4) Denoise (hqdn3d) + Transcode",
+  "5) Loudness Normalize (EBU R128 loudnorm)",
+  "6) Soft Subtitles (mov_text)",
+  "6) Hard Subtitles (burn-in)",
+  "7) Thumbnail Grid (fps=1, 5x4)",
+  "7) GIF (fps=10, width=480)",
+  "8) HDR->SDR Tonemap (zscale+tonemap)",
+  "9) HLS VOD Segments",
+  "9) RTMP Live Stream",
+  "10) Screen/Device Capture (note)"
+];
+let lastFileId = null;
+let lastETASeconds = 0;
+
+function byId(id){return document.getElementById(id)}
+function log(s){ const ta = byId('output'); ta.value += s + "\n"; ta.scrollTop = ta.scrollHeight; }
+function clearOutput(){ byId('output').value = ""; }
+
+(function fillOps(){
+  const sel = byId('operation');
+  OPS.forEach(op => { const o = document.createElement('option'); o.textContent = op; sel.appendChild(o); });
+})();
+
+function apiBase(){ return byId('baseUrl').value.replace(/\/+$/,''); }
+
+async function upload(){
+  const f = byId('fileInput').files[0];
+  if(!f){ alert("请选择文件"); return; }
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch(apiBase()+"/upload", {method:'POST', body:fd});
+  const j = await r.json();
+  if(r.ok){ lastFileId = j.file_id; byId('fileIdSpan').textContent = "已上传: " + j.file_id; log("上传完成: " + JSON.stringify(j)); }
+  else { log("上传失败: " + JSON.stringify(j)); }
+}
+
+async function probe(){
+  if(!lastFileId){ alert("请先上传文件"); return; }
+  const r = await fetch(apiBase()+"/ffprobe?file_id="+encodeURIComponent(lastFileId));
+  const j = await r.json();
+  log("=== ffprobe ===\n"+JSON.stringify(j,null,2));
+}
+
+function gatherParams(){
+  const g = x=>byId(x).value.trim();
+  return {
+    crf:g("crf"), preset:g("preset"),
+    target_w:g("target_w"), target_h:g("target_h"),
+    fps_out:g("fps_out"), bitrate_k:g("bitrate_k"),
+    ss:g("ss"), to:g("to"),
+    overlay:g("overlay"), subs:g("subs"),
+    rtmp_url:g("rtmp_url"), hls_time:g("hls_time"),
+    safety:parseFloat(g("safety")||"1.25"),
+    sample_secs:parseInt(g("sample_secs")||"10",10)
+  };
+}
+
+async function estimate(){
+  if(!lastFileId){ alert("请先上传文件"); return; }
+  const fd = new FormData();
+  fd.append("file_id", lastFileId);
+  fd.append("operation", byId('operation').value);
+  fd.append("params_json", JSON.stringify(gatherParams()));
+  const r = await fetch(apiBase()+"/estimate", {method:'POST', body:fd});
+  const j = await r.json();
+  if(r.ok){
+    lastETASeconds = j.eta_seconds || 0;
+    log("=== Estimate ===");
+    log("Sample speed x = " + j.sample_speed_x);
+    log("Sample cmd: " + j.sample_cmd);
+    log("ETA: " + j.eta_hms + " (" + j.eta_seconds.toFixed(1) + " s)");
+  }else{
+    log("Estimate error: "+JSON.stringify(j));
+  }
+}
+
+async function runLocal(){
+  if(!lastFileId){ alert("请先上传文件"); return; }
+  const fd = new FormData();
+  fd.append("file_id", lastFileId);
+  fd.append("operation", byId('operation').value);
+  fd.append("params_json", JSON.stringify(gatherParams()));
+  fd.append("last_eta_seconds", lastETASeconds);
+  const r = await fetch(apiBase()+"/run_local", {method:'POST', body:fd});
+  const j = await r.json();
+  if(r.ok){
+    log("=== Run Locally ===");
+    log("Start: "+j.start);
+    log("Cmd: "+j.cmd);
+    if(j.stderr_tail) log(j.stderr_tail);
+    log("Finish: "+j.finish);
+    log("Elapsed: "+j.elapsed_hms+" ("+j.elapsed_seconds.toFixed(1)+" s)");
+    if(j.output_path) log("Output: "+j.output_path);
+    if(j.comparison){
+      log("ETA vs Actual: "+j.comparison.eta_hms+" → "+j.comparison.actual_hms+
+          " ("+(j.comparison.diff_seconds>0?"+":"") + j.comparison.diff_seconds.toFixed(1)+" s, "+
+          (j.comparison.diff_percent>0?"+":"")+j.comparison.diff_percent.toFixed(1)+"%)");
+    }
+  }else{
+    log("Run error: "+JSON.stringify(j));
+  }
+}
+
+async function runRemote(){
+  if(!lastFileId){ alert("请先上传文件"); return; }
+  const fd = new FormData();
+  fd.append("file_id", lastFileId);
+  fd.append("operation", byId('operation').value);
+  fd.append("params_json", JSON.stringify(gatherParams()));
+  fd.append("last_eta_seconds", lastETASeconds);
+  const r = await fetch(apiBase()+"/run_remote_stub", {method:'POST', body:fd});
+  const j = await r.json();
+  if(r.ok){
+    log("=== Upload & Run (remote) — STUB ===");
+    log("Upload:\n  "+j.plan.upload.join("\n  "));
+    log("Run:\n  "+j.plan.run);
+    log("Download:\n  "+j.plan.download);
+    if(j.reference_eta) log("Reference ETA: "+j.reference_eta.eta_hms);
+    log(j.note);
+  }else{
+    log("Remote plan error: "+JSON.stringify(j));
+  }
+}
+</script>
+</body>
+</html>
