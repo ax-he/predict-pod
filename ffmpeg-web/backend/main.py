@@ -4,7 +4,7 @@ import os, io, json, shlex, time, datetime, pathlib, subprocess, tempfile, shuti
 from typing import Optional, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
 POPENC = dict(text=True, encoding="utf-8", errors="replace")
@@ -393,6 +393,111 @@ def api_run_local(
         "output_path": out_path if code == 0 else None,
         "comparison": cmp_block
     }
+
+@app.post("/run_local_stream")
+def api_run_local_stream(
+    file_id: str = Form(...),
+    operation: str = Form(...),
+    params_json: str = Form(...),
+    last_eta_seconds: float = Form(0.0)
+):
+    """
+    流式返回 ffmpeg 运行日志（实时）。最后会输出一段以 '=== SUMMARY === ' 开头的 JSON 汇总行。
+    前端按字节流接收并直接显示。
+    """
+    path = str(UPLOAD_DIR / file_id)
+    P = json.loads(params_json)
+
+    if operation == "9) RTMP Live Stream" and not P.get("rtmp_url"):
+        return JSONResponse(status_code=400, content={"error":"RTMP URL required."})
+
+    out_path = choose_output_path(path, operation)
+    if operation == "9) HLS VOD Segments":
+        folder = pathlib.Path(out_path).with_suffix("")
+        folder.mkdir(parents=True, exist_ok=True)
+        out_path = str(folder / "index.m3u8")
+
+    cmd = build_real_run_cmd(path, out_path, operation, P)
+    if operation == "9) RTMP Live Stream":
+        cmd = [FFMPEG, "-re", "-i", path] + build_pipeline_args(operation, P) + ["-f","flv", P["rtmp_url"]]
+
+    def line_stream():
+        start_ts = now_str()
+        t0 = time.time()
+        # 头部信息
+        yield f"=== Run Locally (stream) ===\n"
+        yield f"Start: {start_ts}\n"
+        yield f"Cmd: {' '.join(shlex.quote(str(x)) for x in cmd)}\n"
+        yield "-"*60 + "\n"
+
+        # 运行 ffmpeg 并逐行读取 stderr
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=1,  # 行缓冲
+                **POPENC,    # text=True, encoding='utf-8', errors='replace'
+            )
+        except Exception as e:
+            yield f"[spawn error] {e}\n"
+            # 生成一个汇总行，方便前端结束
+            summary = {
+                "rc": -1,
+                "start": start_ts,
+                "finish": now_str(),
+                "elapsed_seconds": 0.0,
+                "output_path": None,
+                "comparison": None,
+                "error": str(e),
+            }
+            yield f"=== SUMMARY === {json.dumps(summary)}\n"
+            return
+
+        # ffmpeg 大部分日志走 stderr
+        if proc.stderr is not None:
+            for line in proc.stderr:
+                # 实时吐给前端
+                yield line if line.endswith("\n") else (line + "\n")
+
+        # 等待结束
+        rc = proc.wait()
+        finish_ts = now_str()
+        elapsed = time.time() - t0
+
+        # 估时对比
+        cmp_block = None
+        if last_eta_seconds and last_eta_seconds > 0:
+            diff = elapsed - float(last_eta_seconds)
+            pct = (diff / float(last_eta_seconds)) * 100.0
+            cmp_block = {
+                "eta_seconds": float(last_eta_seconds),
+                "eta_hms": pretty_time(float(last_eta_seconds)),
+                "actual_seconds": elapsed,
+                "actual_hms": pretty_time(elapsed),
+                "diff_seconds": diff,
+                "diff_percent": pct
+            }
+
+        # 尾部与汇总
+        yield "-"*60 + "\n"
+        yield f"Finish: {finish_ts}\n"
+        yield f"Elapsed: {pretty_time(elapsed)} ({elapsed:.1f} s)\n"
+        if rc == 0:
+            yield f"Output: {out_path}\n"
+        # 最后一行给一个结构化 JSON，方便前端知道结束与结果
+        summary = {
+            "rc": rc,
+            "start": start_ts,
+            "finish": finish_ts,
+            "elapsed_seconds": elapsed,
+            "output_path": out_path if rc == 0 else None,
+            "comparison": cmp_block
+        }
+        yield f"=== SUMMARY === {json.dumps(summary)}\n"
+
+    # 用 StreamingResponse 持续推送文本
+    return StreamingResponse(line_stream(), media_type="text/plain; charset=utf-8")
 
 @app.post("/run_remote_stub")
 def api_run_remote_stub(
