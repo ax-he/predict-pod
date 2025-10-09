@@ -5,15 +5,159 @@
 <title>FFmpeg ETA Web</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, "PingFang SC","Noto Sans CJK SC","Microsoft YaHei", sans-serif; margin:20px; }
-  fieldset { margin-bottom:14px; }
-  label { display:inline-block; width:180px; vertical-align:top; }
-  input[type="text"], input[type="number"] { width:220px; }
-  select { width:420px; }
-  textarea { width:100%; height:200px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-  .row { margin:6px 0; }
-  .btn { margin-right:8px; padding:6px 10px; }
-  .hint { color:#666; font-size:12px; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow-x: hidden;  /* 横向不滚动 */
+    overflow-y: auto;    /* 纵向自动出现滚动条 */
+  }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, "PingFang SC","Noto Sans CJK SC","Microsoft YaHei", sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 1vh;
+    box-sizing: border-box;
+    max-width: 80%;     /* 限制最大宽度 */
+    margin: 0 auto;        /* 居中，两边留白 */
+  }
+  h2 {
+    margin: 0.5vh 0;
+    font-size: calc(16px + 1vh);
+  }
+  fieldset {
+    margin-bottom: 1vh;
+    padding: 1vh;
+    flex-shrink: 0;
+  }
+  legend {
+    font-size: calc(14px + 0.5vh);
+  }
+  label {
+    display: inline-block;
+    width: 15%;
+    min-width: 150px;
+    vertical-align: top;
+    font-size: calc(12px + 0.4vh);
+  }
+  input[type="text"], input[type="number"] {
+    width: 25%;
+    min-width: 200px;
+    height: calc(20px + 1vh);
+    font-size: calc(12px + 0.4vh);
+  }
+  .file-offscreen {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+  .file-btn {
+    margin-right: 1vw;
+    padding: 1vh 1.5vw;
+    font-size: calc(12px + 0.4vh);
+    white-space: nowrap;
+  }
+  select {
+    width: 25%;
+    min-width: 300px;
+    height: calc(20px + 1vh);
+    font-size: calc(12px + 0.4vh);
+  }
+  textarea {
+    width: 100%;
+    height: 25vh;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: calc(12px + 0.4vh);
+    resize: none;
+  }
+  .row {
+    margin: 1vh 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  /* .btn {
+    margin-right: 1vw;
+    padding: 1vh 1.5vw;
+    font-size: calc(12px + 0.4vh);
+    white-space: nowrap;
+  } */
+  .btn,
+  label.btn {
+    display: inline-flex;              /* 让两者的盒模型一致 */
+    align-items: center;
+    justify-content: center;
+    gap: .25rem;
+    margin-right: 1vw;         /* 水平间距 */
+    margin-bottom: 0.5vh;      /* 垂直间距（按钮换行时） */
+    padding: 1.5vh 2vw;                /* 大小一致 */
+    height: calc(20px + 1vh);
+    line-height: 1;                     /* 避免不同元素的默认行高差异 */
+    min-width: 9rem;                  /* 可按需调，保证宽度看齐 */
+    box-sizing: border-box;
+
+    font: inherit;                      /* 继承页面字体设置 */
+    font-size: calc(12px + 0.4vh);
+    color: #222;                        /* 统一文字颜色 */
+
+    background: #f5f5f5;                /* 统一背景色 */
+    border: 1px solid #ccc;             /* 统一边框色 */
+    border-radius: 6px;
+    cursor: pointer;
+    text-decoration: none;              /* label 默认就没下划线，这里双保险 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* 去掉不同浏览器对 button 的默认外观差异 */
+  button.btn {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid #ccc;             /* 再次声明，确保覆盖系统主题按钮 */
+    background: #f5f5f5;
+  }
+
+  /* 悬停/按下/聚焦状态一致 */
+  .btn:hover,
+  label.btn:hover {
+    background: #eaeaea;
+  }
+
+  .btn:active,
+  label.btn:active {
+    background: #e0e0e0;
+  }
+
+  .btn:focus-visible,
+  label.btn:focus-visible {
+    outline: 2px solid #5b9dd9;         /* 可访问性高亮 */
+    outline-offset: 2px;
+  }
+
+  /* 禁用态（如需） */
+  .btn[disabled],
+  label.btn[aria-disabled="true"] {
+    opacity: .6;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  .hint {
+    color: #666;
+    font-size: calc(10px + 0.3vh);
+  }
+  #output-fieldset {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0;
+  }
+  #output-fieldset textarea {
+    flex-grow: 1;
+    height: 40vh;
+  }
 </style>
 </head>
 <body>
@@ -26,9 +170,22 @@
 
 <fieldset>
 <legend>1) 上传视频</legend>
-<div class="row">
+<!-- <div class="row">
   <input id="fileInput" type="file" />
+  <div class="file-wrapper">
+  <label class="file-btn">
+    选择文件
+    <input id="fileInput" type="file" class="file-input" onchange="showFileName()" />
+  </label>
+</div>
   <button class="btn" onclick="upload()">上传</button>
+  <span id="fileIdSpan" class="hint"></span>
+</div> -->
+<div class="row">
+  <!-- 用 label 触发隐藏的 file input -->
+  <label id="chooseLabel" for="fileInput" class="btn">选择文件</label>
+  <input id="fileInput" type="file" class="file-offscreen" onchange="showFileName()" />
+  <button type="button" class="btn" onclick="upload()">上传</button>
   <span id="fileIdSpan" class="hint"></span>
 </div>
 </fieldset>
@@ -37,12 +194,12 @@
 <legend>2) 操作与参数</legend>
 
 <div class="row">
-  <label>Operation：</label>
+  <label>操作：</label>
   <select id="operation"></select>
 </div>
 
-<div class="row"><label>CRF：</label><input id="crf" type="number" value="23" /></div>
-<div class="row"><label>preset：</label>
+<div class="row"><label>CRF值：</label><input id="crf" type="number" value="23" /></div>
+<div class="row"><label>预设：</label>
   <select id="preset">
     <option>ultrafast</option><option>superfast</option><option>veryfast</option>
     <option>faster</option><option>fast</option><option selected>medium</option>
@@ -50,64 +207,79 @@
   </select>
 </div>
 
-<div class="row"><label>Target Width：</label><input id="target_w" type="number" /></div>
-<div class="row"><label>Target Height：</label><input id="target_h" type="number" /></div>
-<div class="row"><label>Output FPS：</label><input id="fps_out" type="number" /></div>
-<div class="row"><label>Bitrate (kbps, 2-pass)：</label><input id="bitrate_k" type="number" value="4000" /></div>
+<div class="row"><label>目标宽度：</label><input id="target_w" type="number" /></div>
+<div class="row"><label>目标高度：</label><input id="target_h" type="number" /></div>
+<div class="row"><label>输出帧率：</label><input id="fps_out" type="number" /></div>
+<div class="row"><label>码率 (kbps，双通道)：</label><input id="bitrate_k" type="number" value="4000" /></div>
 
-<div class="row"><label>Start -ss (00:00:10)：</label><input id="ss" type="text" /></div>
-<div class="row"><label>End -to (00:00:20)：</label><input id="to" type="text" /></div>
+<div class="row"><label>开始时间 (例: 00:00:10)：</label><input id="ss" type="text" /></div>
+<div class="row"><label>结束时间 (例: 00:00:20)：</label><input id="to" type="text" /></div>
 
-<div class="row"><label>Overlay PNG 路径：</label><input id="overlay" type="text" placeholder="/path/overlay.png" /></div>
-<div class="row"><label>Subtitles (.srt) 路径：</label><input id="subs" type="text" placeholder="/path/subs.srt" /></div>
+<div class="row"><label>水印图片路径：</label><input id="overlay" type="text" placeholder="/path/overlay.png" /></div>
+<div class="row"><label>字幕文件路径：</label><input id="subs" type="text" placeholder="/path/subs.srt" /></div>
 
-<div class="row"><label>RTMP URL：</label><input id="rtmp_url" type="text" placeholder="rtmp://server/live/streamkey" /></div>
-<div class="row"><label>HLS segment time (s)：</label><input id="hls_time" type="number" value="6" /></div>
+<div class="row"><label>RTMP推流地址：</label><input id="rtmp_url" type="text" placeholder="rtmp://server/live/streamkey" /></div>
+<div class="row"><label>HLS分片时长（秒）：</label><input id="hls_time" type="number" value="6" /></div>
 
 </fieldset>
 
 <fieldset>
 <legend>3) 估时参数</legend>
-<div class="row"><label>Safety factor：</label><input id="safety" type="number" step="0.05" value="1.25" /></div>
-<div class="row"><label>Sample seconds：</label><input id="sample_secs" type="number" value="10" /></div>
+<div class="row"><label>安全系数：</label><input id="safety" type="number" step="0.05" value="1.25" /></div>
+<div class="row"><label>采样时长（秒）：</label><input id="sample_secs" type="number" value="10" /></div>
 </fieldset>
 
 <div class="row">
-  <button class="btn" onclick="probe()">(1) Probe (ffprobe)</button>
-  <button class="btn" onclick="estimate()">(2) Sample & Estimate</button>
-  <button class="btn" onclick="runLocal()">(3) Run Locally</button>
-  <button class="btn" onclick="runRemote()">(4) Upload & Run (remote)</button>
-  <button class="btn" onclick="clearOutput()">清空输出</button>
+  <button class="btn" onclick="probe()">(1) 探测 (ffprobe)</button>
+  <button class="btn" onclick="estimate()">(2) 采样与预估</button>
+  <button class="btn" onclick="runLocal()">(3) 本地运行</button>
+  <button class="btn" onclick="runRemote()">(4) 上传并远程运行</button>
+  <button class="btn" onclick="clearOutput()">(5) 清空输出</button>
 </div>
 
-<fieldset>
-<legend>Output</legend>
+<fieldset id="output-fieldset">
+<legend>4) 输出</legend>
 <textarea id="output" readonly></textarea>
 </fieldset>
 
 <script>
 const OPS = [
-  "1) H.264 CRF Transcode",
-  "1) H.265 CRF Transcode (Slow)",
-  "1) Remux (No Re-encode)",
-  "2) Fast Trim (no re-encode, keyframe aligned)",
-  "2) Precise Trim (re-encode)",
-  "3) Scale+FPS (CRF quality)",
-  "3) Two-pass Target Bitrate",
-  "4) Overlay Watermark (PNG at 10,10)",
-  "4) Denoise (hqdn3d) + Transcode",
-  "5) Loudness Normalize (EBU R128 loudnorm)",
-  "6) Soft Subtitles (mov_text)",
-  "6) Hard Subtitles (burn-in)",
-  "7) Thumbnail Grid (fps=1, 5x4)",
-  "7) GIF (fps=10, width=480)",
-  "8) HDR->SDR Tonemap (zscale+tonemap)",
-  "9) HLS VOD Segments",
-  "9) RTMP Live Stream",
-  "10) Screen/Device Capture (note)"
+  "1) H.264 CRF 转码",
+  "1) H.265 CRF 转码 (较慢)",
+  "1) 封装转换 (不重新编码)",
+  "2) 快速剪辑 (不重编码，关键帧对齐)",
+  "2) 精确剪辑 (需要重编码)",
+  "3) 缩放+帧率 (CRF质量)",
+  "3) 两遍编码目标码率",
+  "4) 叠加水印 (PNG位于10,10)",
+  "4) 降噪 (hqdn3d) + 转码",
+  "5) 音量标准化 (EBU R128 loudnorm)",
+  "6) 软字幕 (mov_text)",
+  "6) 硬字幕 (烧入视频)",
+  "7) 缩略图网格 (fps=1, 5x4)",
+  "7) GIF动图 (fps=10, 宽度=480)",
+  "8) HDR转SDR色调映射 (zscale+tonemap)",
+  "9) HLS点播分片",
+  "9) RTMP直播推流",
+  "10) 屏幕/设备采集 (说明)"
 ];
 let lastFileId = null;
 let lastETASeconds = 0;
+
+function showFileName() {
+  const input = document.getElementById('fileInput');
+  const span  = document.getElementById('fileIdSpan');
+  const label = document.getElementById('chooseLabel');
+  if (input.files && input.files.length > 0) {
+    const f = input.files[0];
+    const mb = (f.size/1024/1024).toFixed(1);
+    span.textContent = `已选择: ${f.name} (${mb} MB)`;
+    label.textContent = '重新选择';
+  } else {
+    span.textContent = '';
+    label.textContent = '选择文件';
+  }
+}
 
 function byId(id){return document.getElementById(id)}
 function log(s){ const ta = byId('output'); ta.value += s + "\n"; ta.scrollTop = ta.scrollHeight; }
@@ -177,24 +349,51 @@ async function runLocal(){
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);
-  const r = await fetch(apiBase()+"/run_local", {method:'POST', body:fd});
-  const j = await r.json();
-  if(r.ok){
-    log("=== Run Locally ===");
-    log("Start: "+j.start);
-    log("Cmd: "+j.cmd);
-    if(j.stderr_tail) log(j.stderr_tail);
-    log("Finish: "+j.finish);
-    log("Elapsed: "+j.elapsed_hms+" ("+j.elapsed_seconds.toFixed(1)+" s)");
-    if(j.output_path) log("Output: "+j.output_path);
-    if(j.comparison){
-      log("ETA vs Actual: "+j.comparison.eta_hms+" → "+j.comparison.actual_hms+
-          " ("+(j.comparison.diff_seconds>0?"+":"") + j.comparison.diff_seconds.toFixed(1)+" s, "+
-          (j.comparison.diff_percent>0?"+":"")+j.comparison.diff_percent.toFixed(1)+"%)");
-    }
-  }else{
-    log("Run error: "+JSON.stringify(j));
+
+  // 先清一行提示
+  log("=== Run Locally (stream) ===");
+
+  // 用 fetch 读取流式响应，逐块追加到输出框
+  const r = await fetch(apiBase()+"/run_local_stream", {method:'POST', body:fd});
+  if(!r.ok){
+    const msg = await r.text();
+    log("Run error: " + msg);
+    return;
   }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder(); // 默认 utf-8
+  let buf = "";
+
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, {stream:true});
+    // 按行切割
+    const parts = buf.split(/\r?\n/);
+    // 留最后一段（可能是半行）
+    buf = parts.pop() || "";
+    for (const line of parts) {
+      if (!line) { log(""); continue; }
+      log(line);
+      // 识别结束的 SUMMARY JSON，可在这里做额外 UI 更新
+      if (line.startsWith("=== SUMMARY === ")) {
+        try {
+          const j = JSON.parse(line.slice("=== SUMMARY === ".length));
+          if (j && j.comparison) {
+            log(`ETA vs Actual: ${j.comparison.eta_hms} → ${j.comparison.actual_hms} (${j.comparison.diff_seconds>0?"+":""}${j.comparison.diff_seconds.toFixed(1)} s, ${(j.comparison.diff_percent>0?"+":"")}${j.comparison.diff_percent.toFixed(1)}%)`);
+          }
+        } catch (e) {
+          // ignore parse error
+        }
+      }
+    }
+    // 始终滚动到底部
+    byId('output').scrollTop = byId('output').scrollHeight;
+  }
+
+  // 把残留半行打印出来
+  if (buf) log(buf);
 }
 
 async function runRemote(){
