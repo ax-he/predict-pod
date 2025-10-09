@@ -133,6 +133,28 @@ OPS = [
     "10) Screen/Device Capture (note)",
 ]
 
+# 操作名称映射：英文值 => 中文显示（用于GUI显示）
+OP_LABELS = {
+    "1) H.264 CRF Transcode": "1) H.264 CRF 转码",
+    "1) H.265 CRF Transcode (Slow)": "1) H.265 CRF 转码 (较慢)",
+    "1) Remux (No Re-encode)": "1) 封装转换 (不重新编码)",
+    "2) Fast Trim (no re-encode, keyframe aligned)": "2) 快速剪辑 (不重编码，关键帧对齐)",
+    "2) Precise Trim (re-encode)": "2) 精确剪辑 (需要重编码)",
+    "3) Scale+FPS (CRF quality)": "3) 缩放+帧率 (CRF质量)",
+    "3) Two-pass Target Bitrate": "3) 两遍编码目标码率",
+    "4) Overlay Watermark (PNG at 10,10)": "4) 叠加水印 (PNG位于10,10)",
+    "4) Denoise (hqdn3d) + Transcode": "4) 降噪 (hqdn3d) + 转码",
+    "5) Loudness Normalize (EBU R128 loudnorm)": "5) 音量标准化 (EBU R128 loudnorm)",
+    "6) Soft Subtitles (mov_text)": "6) 软字幕 (mov_text)",
+    "6) Hard Subtitles (burn-in)": "6) 硬字幕 (烧入视频)",
+    "7) Thumbnail Grid (fps=1, 5x4)": "7) 缩略图网格 (fps=1, 5x4)",
+    "7) GIF (fps=10, width=480)": "7) GIF动图 (fps=10, 宽度=480)",
+    "8) HDR->SDR Tonemap (zscale+tonemap)": "8) HDR转SDR色调映射 (zscale+tonemap)",
+    "9) HLS VOD Segments": "9) HLS点播分片",
+    "9) RTMP Live Stream": "9) RTMP直播推流",
+    "10) Screen/Device Capture (note)": "10) 屏幕/设备采集 (说明)"
+}
+
 OP_NOTES = {
     "1) Remux (No Re-encode)": "ETA ≈ I/O bound; sampling speed is less meaningful.",
     "2) Fast Trim (no re-encode, keyframe aligned)": "Uses -ss before -i and -c copy. Requires start/end times.",
@@ -283,18 +305,26 @@ def build_pipeline_args(op, P):
         vf_arg = ["-vf", ",".join(vf)]
     return vf_arg + vcodec + aargs
 
-def run_sample(input_path, pipeline_args, duration_full, sample_secs=SAMPLE_SECS, op_name=""):
+def run_sample(input_path, full_cmd_args, duration_full, sample_secs=SAMPLE_SECS, op_name=""):
     # Handle special cases: capture / remux / streaming where ETA is odd but we still try to gauge encode speed
     cmd = ["ffmpeg", "-y"]
-    # Trim ops: apply -ss/-to for representativeness (if provided)
-    # We only add -ss/-to at sampling time for trim modes.
-    # (Real execution should repeat identical flags.)
-    if MID_SAMPLE and duration_full > sample_secs * 3 and not op_name.startswith("2) Fast Trim"):
-        start = max(0.0, duration_full * 0.2)
-        cmd += ["-ss", f"{start:.2f}"]
 
-    # Add short sample window
-    cmd += ["-t", str(sample_secs), "-i", input_path] + pipeline_args + ["-f", "null", "-", "-v", "quiet", "-stats"]
+    # 处理中间采样逻辑（仅对非快速剪辑操作）
+    if MID_SAMPLE and duration_full > sample_secs * 3 and not op_name.startswith("2) Fast Trim"):
+        # 在第一个输入文件之前插入 -ss 参数
+        start = max(0.0, duration_full * 0.2)
+        # 找到第一个 -i 参数的位置
+        try:
+            input_idx = full_cmd_args.index("-i")
+            cmd.extend(full_cmd_args[:input_idx])
+            cmd.extend(["-ss", f"{start:.2f}"])
+            cmd.extend(full_cmd_args[input_idx:])
+        except ValueError:
+            # 如果没有找到 -i 参数，回退到原有逻辑
+            cmd += ["-ss", f"{start:.2f}"] + full_cmd_args
+    else:
+        cmd.extend(full_cmd_args)
+
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     _, err = p.communicate()
     sp = parse_speed_from_ffmpeg(err)
@@ -311,7 +341,7 @@ def estimate_total_seconds(duration, speed, safety=SAFETY, op_name=""):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("FFmpeg ETA Helper (10 function groups included)")
+        self.title("FFmpeg 预估助手 (包含10个功能组)")
         self.geometry("900x640")
 
         # >>> NEW: to store last ETA for comparison
@@ -320,93 +350,95 @@ class App(tk.Tk):
 
         # Top: input file
         top = ttk.Frame(self); top.pack(fill="x", padx=12, pady=8)
-        ttk.Label(top, text="Input video:").grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="输入视频:").grid(row=0, column=0, sticky="w")
         self.in_path = tk.StringVar()
         ttk.Entry(top, textvariable=self.in_path, width=70).grid(row=0, column=1, sticky="we", padx=6)
-        ttk.Button(top, text="Browse…", command=self.browse_file).grid(row=0, column=2)
+        ttk.Button(top, text="浏览…", command=self.browse_file).grid(row=0, column=2)
 
-        # Operation
-        opsf = ttk.LabelFrame(self, text="Operation & Common Parameters")
+        # 操作设置
+        opsf = ttk.LabelFrame(self, text="操作与通用参数")
         opsf.pack(fill="x", padx=12, pady=8)
 
         self.op_var = tk.StringVar(value=OPS[0])
-        ttk.Label(opsf, text="Operation:").grid(row=0, column=0, sticky="e")
-        ttk.Combobox(opsf, textvariable=self.op_var, values=OPS, state="readonly", width=38)\
+        # 创建中文显示标签列表
+        op_labels = [OP_LABELS.get(op, op) for op in OPS]
+        ttk.Label(opsf, text="操作:").grid(row=0, column=0, sticky="e")
+        ttk.Combobox(opsf, textvariable=self.op_var, values=op_labels, state="readonly", width=38)\
             .grid(row=0, column=1, sticky="w", padx=6, columnspan=3)
 
-        ttk.Label(opsf, text="CRF:").grid(row=1, column=0, sticky="e")
+        ttk.Label(opsf, text="CRF值:").grid(row=1, column=0, sticky="e")
         self.crf_var = tk.StringVar(value="23")
         ttk.Entry(opsf, textvariable=self.crf_var, width=6).grid(row=1, column=1, sticky="w")
 
-        ttk.Label(opsf, text="preset:").grid(row=1, column=2, sticky="e")
+        ttk.Label(opsf, text="预设:").grid(row=1, column=2, sticky="e")
         self.preset_var = tk.StringVar(value="medium")
         ttk.Combobox(opsf, textvariable=self.preset_var,
                      values=["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"],
                      state="readonly", width=10).grid(row=1, column=3, sticky="w")
 
-        ttk.Label(opsf, text="Target Width:").grid(row=2, column=0, sticky="e")
+        ttk.Label(opsf, text="目标宽度:").grid(row=2, column=0, sticky="e")
         self.tw_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.tw_var, width=8).grid(row=2, column=1, sticky="w")
-        ttk.Label(opsf, text="Target Height:").grid(row=2, column=2, sticky="e")
+        ttk.Label(opsf, text="目标高度:").grid(row=2, column=2, sticky="e")
         self.th_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.th_var, width=8).grid(row=2, column=3, sticky="w")
 
-        ttk.Label(opsf, text="Output FPS:").grid(row=3, column=0, sticky="e")
+        ttk.Label(opsf, text="输出帧率:").grid(row=3, column=0, sticky="e")
         self.fps_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.fps_var, width=8).grid(row=3, column=1, sticky="w")
 
-        ttk.Label(opsf, text="Bitrate (kbps, 2-pass):").grid(row=3, column=2, sticky="e")
+        ttk.Label(opsf, text="码率(kbps，双通道):").grid(row=3, column=2, sticky="e")
         self.br_var = tk.StringVar(value="4000")
         ttk.Entry(opsf, textvariable=self.br_var, width=10).grid(row=3, column=3, sticky="w")
 
-        ttk.Label(opsf, text="Start -ss (e.g. 00:00:10):").grid(row=4, column=0, sticky="e")
+        ttk.Label(opsf, text="开始时间 -ss (例: 00:00:10):").grid(row=4, column=0, sticky="e")
         self.ss_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.ss_var, width=12).grid(row=4, column=1, sticky="w")
 
-        ttk.Label(opsf, text="End -to (e.g. 00:00:20):").grid(row=4, column=2, sticky="e")
+        ttk.Label(opsf, text="结束时间 -to (例: 00:00:20):").grid(row=4, column=2, sticky="e")
         self.to_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.to_var, width=12).grid(row=4, column=3, sticky="w")
 
-        ttk.Label(opsf, text="Overlay PNG:").grid(row=5, column=0, sticky="e")
+        ttk.Label(opsf, text="水印图片:").grid(row=5, column=0, sticky="e")
         self.overlay_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.overlay_var, width=30).grid(row=5, column=1, sticky="w")
-        ttk.Button(opsf, text="Pick…", command=self.pick_overlay).grid(row=5, column=2, sticky="w")
+        ttk.Button(opsf, text="选择…", command=self.pick_overlay).grid(row=5, column=2, sticky="w")
 
-        ttk.Label(opsf, text="Subtitles (.srt):").grid(row=6, column=0, sticky="e")
+        ttk.Label(opsf, text="字幕文件 (.srt):").grid(row=6, column=0, sticky="e")
         self.subs_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.subs_var, width=30).grid(row=6, column=1, sticky="w")
-        ttk.Button(opsf, text="Pick…", command=self.pick_subs).grid(row=6, column=2, sticky="w")
+        ttk.Button(opsf, text="选择…", command=self.pick_subs).grid(row=6, column=2, sticky="w")
 
-        ttk.Label(opsf, text="RTMP URL:").grid(row=7, column=0, sticky="e")
+        ttk.Label(opsf, text="RTMP地址:").grid(row=7, column=0, sticky="e")
         self.rtmp_var = tk.StringVar()
         ttk.Entry(opsf, textvariable=self.rtmp_var, width=40).grid(row=7, column=1, columnspan=3, sticky="we")
 
-        ttk.Label(opsf, text="HLS segment time (s):").grid(row=8, column=0, sticky="e")
+        ttk.Label(opsf, text="HLS分片时长(秒):").grid(row=8, column=0, sticky="e")
         self.hls_time_var = tk.StringVar(value="6")
         ttk.Entry(opsf, textvariable=self.hls_time_var, width=6).grid(row=8, column=1, sticky="w")
 
-        # Estimation params
-        estf = ttk.LabelFrame(self, text="Estimation Parameters")
+        # 预估参数
+        estf = ttk.LabelFrame(self, text="预估参数")
         estf.pack(fill="x", padx=12, pady=8)
-        ttk.Label(estf, text="Safety factor:").grid(row=0, column=0, sticky="e")
+        ttk.Label(estf, text="安全系数:").grid(row=0, column=0, sticky="e")
         self.safety_var = tk.StringVar(value=str(SAFETY))
         ttk.Entry(estf, textvariable=self.safety_var, width=6).grid(row=0, column=1, sticky="w")
-        ttk.Label(estf, text="Sample seconds:").grid(row=0, column=2, sticky="e")
+        ttk.Label(estf, text="采样时长(秒):").grid(row=0, column=2, sticky="e")
         self.sample_var = tk.StringVar(value=str(SAMPLE_SECS))
         ttk.Entry(estf, textvariable=self.sample_var, width=6).grid(row=0, column=3, sticky="w")
 
-        # Buttons
+        # 按钮
         btnf = ttk.Frame(self); btnf.pack(fill="x", padx=12, pady=4)
-        ttk.Button(btnf, text="(1) Probe (ffprobe)", command=self.on_probe).pack(side="left", padx=4)
-        ttk.Button(btnf, text="(2) Sample & Estimate", command=self.on_estimate).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(1) 探测 (ffprobe)", command=self.on_probe).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(2) 采样与预估", command=self.on_estimate).pack(side="left", padx=4)
         # >>> NEW: two extra action buttons
-        ttk.Button(btnf, text="(3) Run Locally", command=self.on_run_local).pack(side="left", padx=4)
-        ttk.Button(btnf, text="(4) Upload & Run (remote)", command=self.on_run_remote_stub).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(3) 本地运行", command=self.on_run_local).pack(side="left", padx=4)
+        ttk.Button(btnf, text="(4) 上传并远程运行", command=self.on_run_remote_stub).pack(side="left", padx=4)
         # <<< NEW
-        ttk.Button(btnf, text="Clear Output", command=lambda: self.txt.delete("1.0","end")).pack(side="left", padx=4)
+        ttk.Button(btnf, text="清空输出", command=lambda: self.txt.delete("1.0","end")).pack(side="left", padx=4)
 
-        # Output
-        outf = ttk.LabelFrame(self, text="Output")
+        # 输出
+        outf = ttk.LabelFrame(self, text="输出")
         outf.pack(fill="both", expand=True, padx=12, pady=8)
         self.txt = tk.Text(outf, height=16, wrap="word")
         self.txt.pack(fill="both", expand=True)
@@ -420,17 +452,17 @@ class App(tk.Tk):
         self.txt.see("end")
 
     def browse_file(self):
-        path = filedialog.askopenfilename(title="Select video file")
+        path = filedialog.askopenfilename(title="选择视频文件")
         if path:
             self.in_path.set(path)
 
     def pick_overlay(self):
-        path = filedialog.askopenfilename(title="Pick PNG Overlay", filetypes=[("PNG","*.png"),("All files","*.*")])
+        path = filedialog.askopenfilename(title="选择水印图片", filetypes=[("PNG","*.png"),("所有文件","*.*")])
         if path:
             self.overlay_var.set(path)
 
     def pick_subs(self):
-        path = filedialog.askopenfilename(title="Pick Subtitles (.srt)", filetypes=[("SRT","*.srt"),("All files","*.*")])
+        path = filedialog.askopenfilename(title="选择字幕文件", filetypes=[("SRT","*.srt"),("所有文件","*.*")])
         if path:
             self.subs_var.set(path)
 
@@ -440,12 +472,12 @@ class App(tk.Tk):
         if not which("ffmpeg"):  missing.append("ffmpeg")
         if missing:
             messagebox.showwarning(
-                "Missing dependencies",
-                f"Not found: {', '.join(missing)}.\nPlease install in WSL:\n  sudo apt install -y ffmpeg"
+                "缺少依赖",
+                f"未找到: {', '.join(missing)}。\n请在WSL中安装:\n  sudo apt install -y ffmpeg"
             )
         else:
-            self.log("ffmpeg / ffprobe detected. Ready.")
-            self.log("Tip: set SAMPLE_SECS to 20–30s for more stable ETAs on long/complex jobs.")
+            self.log("检测到 ffmpeg / ffprobe。准备就绪。")
+            self.log("提示: 对于长视频/复杂任务，将SAMPLE_SECS设为20–30秒可获得更稳定的预估。")
 
     def gather_params(self):
         def nz(s): 
@@ -480,22 +512,22 @@ class App(tk.Tk):
     def on_probe(self):
         path = self.in_path.get().strip()
         if not path:
-            messagebox.showinfo("Info", "Please select an input video file first.")
+            messagebox.showinfo("提示", "请先选择输入视频文件。")
             return
         def work():
             try:
                 info = ffprobe_info(path)
-                self.log("=== ffprobe info ===")
+                self.log("=== 视频探测信息 ===")
                 self.log(json.dumps(info, indent=2, ensure_ascii=False))
             except Exception as e:
-                self.log(f"[probe error] {e}")
+                self.log(f"[探测错误] {e}")
         threading.Thread(target=work, daemon=True).start()
 
     def on_estimate(self):
         path = self.in_path.get().strip()
         if not path:
             # For capture/streaming ETA there is no input; but we still require a file for sampling-based ETA.
-            messagebox.showinfo("Info", "Please select an input video file first (sampling-based ETA).")
+            messagebox.showinfo("提示", "请先选择输入视频文件（基于采样的预估）。")
             return
 
         op = self.op_var.get()
@@ -510,46 +542,67 @@ class App(tk.Tk):
                 info = ffprobe_info(path)
                 self.log("=== ffprobe info (for estimation) ===")
                 self.log(json.dumps(info, indent=2, ensure_ascii=False))
+                self.log(f"操作类型: {OP_LABELS.get(op, op)}")
 
-                # Trim flags: only used for trim ops in real run; for sampling we keep short -t window.
-                trim_prefix = []
-                if op.startswith("2) Fast Trim") or op.startswith("2) Precise Trim"):
-                    if P["ss"]: trim_prefix += ["-ss", P["ss"]]
-                    if P["to"]: trim_prefix += ["-to", P["to"]]
+                # Build complete sampling command (consistent with actual run command logic)
+                base = ["ffmpeg", "-y"]
+
+                # Handle trim prefix (only for non-fast trim middle sampling)
+                if MID_SAMPLE and info["duration"] > P["sample_secs"] * 3 and not op.startswith("2) Fast Trim"):
+                    if op.startswith("2) Fast Trim") or op.startswith("2) Precise Trim"):
+                        if P["ss"]: base += ["-ss", P["ss"]]
+                        if P["to"]: base += ["-to", P["to"]]
+
+                base += ["-t", str(P["sample_secs"])]
+
+                # Add input files
+                inputs = ["-i", path]
+
+                # Handle extra inputs
+                if op == "4) Overlay Watermark (PNG at 10,10)":
+                    if not P["overlay"]:
+                        raise RuntimeError("Overlay PNG required for overlay operation.")
+                    inputs = ["-i", path, "-i", P["overlay"]]
+                elif op == "6) Soft Subtitles (mov_text)":
+                    if not P["subs"]:
+                        raise RuntimeError("Subtitles .srt required for soft subtitles.")
+                    inputs = ["-i", path, "-i", P["subs"]]
+                elif op == "6) Hard Subtitles (burn-in)":
+                    if not P["subs"]:
+                        raise RuntimeError("Subtitles .srt required for hard subtitles.")
+                    inputs = ["-i", path, "-i", P["subs"]]
 
                 pipeline = build_pipeline_args(op, P)
 
-                # For overlay/hard-subs sampling, we still must add overlay/subs inputs if needed.
-                # To keep the sampling simple, we assume overlay/subs are readable paths.
-                sample_cmd = ["ffmpeg", "-t", str(P["sample_secs"])]
-                if trim_prefix: sample_cmd = ["ffmpeg"] + trim_prefix + ["-t", str(P["sample_secs"])]
-                sample_cmd += ["-i", path]
+                # Special pipeline handling for certain operations
+                if op == "6) Soft Subtitles (mov_text)":
+                    pipeline = ["-c:v","copy","-c:a","copy","-c:s","mov_text","-map","0","-map","1:0"]
+                elif op == "7) Thumbnail Grid (fps=1, 5x4)":
+                    pipeline += ["-frames:v","1"]
+                elif op == "9) HLS VOD Segments":
+                    pipeline += ["-hls_time", P.get("hls_time") or "6", "-hls_playlist_type","vod"]
 
-                if op == "4) Overlay Watermark (PNG at 10,10)" and P["overlay"]:
-                    sample_cmd = sample_cmd[:-3] + ["-i", P["overlay"]] + sample_cmd[-3:]
-                if op == "6) Soft Subtitles (mov_text)" and P["subs"]:
-                    sample_cmd = sample_cmd[:-3] + ["-i", P["subs"]] + sample_cmd[-3:]
-
-                full_cmd = sample_cmd + pipeline + ["-f","null","-","-v","quiet","-stats"]
-                self.log("Sample command snippet:")
+                # Combine complete command
+                full_cmd = base + inputs + pipeline + ["-f","null","-","-v","quiet","-stats"]
+                self.log("采样命令片段:")
                 self.log("  " + " ".join(shlex.quote(x) for x in full_cmd[:20]) + (" ..." if len(full_cmd) > 20 else ""))
 
-                # Actually run sampling (single pass). For two-pass we’ll multiply by 2 later.
-                sp = run_sample(path, pipeline, info["duration"], P["sample_secs"], op_name=op)
+                # Actually run sampling with complete command
+                sp = run_sample(path, full_cmd, info["duration"], P["sample_secs"], op_name=op)
                 t_total = estimate_total_seconds(info["duration"], sp, P["safety"], op_name=op)
 
                 # >>> NEW: remember ETA for comparison after real run
                 self.last_eta_s = t_total
                 # <<< NEW
 
-                self.log(f"Sample speed ≈ {sp:.2f}x (real-time multiplier)")
-                self.log(f"Video duration ≈ {pretty_time(info['duration'])}")
-                self.log(f"Safety factor = {P['safety']}")
-                self.log(f"Estimated local total time ≈ {pretty_time(t_total)}  (≈ {t_total:.1f} s)")
+                self.log(f"采样速度 ≈ {sp:.2f}x (实时倍数)")
+                self.log(f"视频时长 ≈ {pretty_time(info['duration'])}")
+                self.log(f"安全系数 = {P['safety']}")
+                self.log(f"预估总时间 ≈ {pretty_time(t_total)}  (≈ {t_total:.1f} 秒)")
                 self.log("-"*60)
 
             except Exception as e:
-                self.log(f"[estimate error] {e}")
+                self.log(f"[预估错误] {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -593,6 +646,10 @@ class App(tk.Tk):
             if not P["subs"]:
                 raise RuntimeError("Subtitles .srt required for soft subtitles.")
             inputs = ["-i", input_path, "-i", P["subs"]]
+        if op == "6) Hard Subtitles (burn-in)":
+            if not P["subs"]:
+                raise RuntimeError("Subtitles .srt required for hard subtitles.")
+            inputs = ["-i", input_path, "-i", P["subs"]]
 
         after_inputs = []
         if op.startswith("2) Precise Trim"):
@@ -619,14 +676,14 @@ class App(tk.Tk):
     def on_run_local(self):
         input_path = self.in_path.get().strip()
         if not input_path:
-            return messagebox.showinfo("Info","Please select an input video file first.")
+            return messagebox.showinfo("提示","请先选择输入视频文件。")
         op = self.op_var.get()
         P = self.gather_params()
 
         if op == "9) RTMP Live Stream" and not P["rtmp_url"]:
-            return messagebox.showinfo("Info","Please fill RTMP URL before running live stream.")
+            return messagebox.showinfo("提示","运行直播推流前请填写RTMP地址。")
         if op.startswith("10) "):
-            return messagebox.showinfo("Info","Screen/Device capture is not supported in this file-based runner.")
+            return messagebox.showinfo("提示","屏幕/设备采集在此基于文件的运行器中不受支持。")
 
         out_path = self._choose_output_path(input_path, op)
         # For HLS create folder
@@ -637,8 +694,8 @@ class App(tk.Tk):
 
         def work():
             try:
-                self.log(f"=== Run Locally: {op} ===")
-                self.log(f"Start time: {now_str()}")
+                self.log(f"=== 本地运行: {OP_LABELS.get(op, op)} ===")
+                self.log(f"开始时间: {now_str()}")
                 t0 = time.time()
 
                 cmd = self._build_real_run_cmd(input_path, out_path, op, P)
@@ -646,7 +703,7 @@ class App(tk.Tk):
                     # stream to RTMP
                     cmd = ["ffmpeg","-re","-i", input_path] + build_pipeline_args(op, P) + ["-f","flv", P["rtmp_url"]]
 
-                self.log("Command:")
+                self.log("完整命令:")
                 self.log("  " + " ".join(shlex.quote(x) for x in cmd[:40]) + (" ..." if len(cmd) > 40 else ""))
 
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -663,19 +720,19 @@ class App(tk.Tk):
                 if code != 0:
                     self.log(f"[run error] ffmpeg exited with code {code}")
                 else:
-                    self.log(f"Output file: {out_path}")
+                    self.log(f"输出文件: {out_path}")
 
-                self.log(f"Finish time: {now_str()}")
-                self.log(f"Elapsed: {pretty_time(elapsed)}  (≈ {elapsed:.1f} s)")
+                self.log(f"完成时间: {now_str()}")
+                self.log(f"耗时: {pretty_time(elapsed)}  (≈ {elapsed:.1f} 秒)")
 
                 if self.last_eta_s is not None:
                     diff = elapsed - self.last_eta_s
                     pct = (diff / self.last_eta_s) * 100.0
-                    self.log(f"ETA comparison: estimated {pretty_time(self.last_eta_s)}  → actual {pretty_time(elapsed)}  ({diff:+.1f}s, {pct:+.1f}%)")
+                    self.log(f"预估对比: 预估 {pretty_time(self.last_eta_s)}  → 实际 {pretty_time(elapsed)}  ({diff:+.1f}秒, {pct:+.1f}%)")
 
                 self.log("-"*60)
             except Exception as e:
-                self.log(f"[run error] {e}")
+                self.log(f"[运行错误] {e}")
 
         threading.Thread(target=work, daemon=True).start()
     # <<< NEW
@@ -684,7 +741,7 @@ class App(tk.Tk):
     def on_run_remote_stub(self):
         input_path = self.in_path.get().strip()
         if not input_path:
-            return messagebox.showinfo("Info","Please select an input video file first.")
+            return messagebox.showinfo("提示","请先选择输入视频文件。")
         op = self.op_var.get()
         P = self.gather_params()
 
@@ -694,36 +751,36 @@ class App(tk.Tk):
 
         def work():
             try:
-                self.log("=== Upload & Run (remote) — STUB ===")
-                self.log(f"Plan start: {now_str()}")
+                self.log("=== 上传并远程运行 (存根) ===")
+                self.log(f"计划开始: {now_str()}")
                 # Build a remote-side command preview
                 try:
                     preview_cmd = self._build_real_run_cmd("/path/on/remote/input.mp4",
                                                            "/path/on/remote/output.mp4", op, P)
                 except Exception as e:
-                    self.log(f"[plan error] {e}")
+                    self.log(f"[计划错误] {e}")
                     return
 
-                self.log("Remote server not configured yet. Typical steps when ready:")
-                self.log("  1) Upload input:")
-                self.log("     scp <LOCAL_INPUT>  REMOTE:REMOTE_DIR/input.mp4")
+                self.log("远程服务器尚未配置。准备就绪后的典型步骤:")
+                self.log("  1) 上传输入文件:")
+                self.log("     scp <本地输入文件>  远程服务器:远程目录/input.mp4")
                 if op == "4) Overlay Watermark (PNG at 10,10)" and P['overlay']:
-                    self.log("     scp <overlay.png> REMOTE:REMOTE_DIR/overlay.png")
+                    self.log("     scp <水印.png> 远程服务器:远程目录/overlay.png")
                 if op.startswith("6)") and P['subs']:
-                    self.log("     scp <subs.srt>    REMOTE:REMOTE_DIR/subs.srt")
-                self.log("  2) Execute remotely:")
-                self.log("     ssh REMOTE 'cd REMOTE_DIR && " +
+                    self.log("     scp <字幕.srt>    远程服务器:远程目录/subs.srt")
+                self.log("  2) 远程执行:")
+                self.log("     ssh 远程服务器 'cd 远程目录 && " +
                          " ".join(shlex.quote(x) for x in preview_cmd) + "'")
-                self.log("  3) Download result:")
-                self.log("     scp REMOTE:REMOTE_DIR/output.*  <LOCAL_DIR>/")
-                self.log("Fill REMOTE / REMOTE_DIR later.")
+                self.log("  3) 下载结果:")
+                self.log("     scp 远程服务器:远程目录/output.*  <本地目录>/")
+                self.log("稍后填写远程服务器和远程目录配置。")
 
-                self.log(f"Plan finish: {now_str()}")
+                self.log(f"计划完成: {now_str()}")
                 if self.last_eta_s is not None:
-                    self.log(f"[Reference] Last local ETA: {pretty_time(self.last_eta_s)}")
+                    self.log(f"[参考] 上次本地预估: {pretty_time(self.last_eta_s)}")
                 self.log("-"*60)
             except Exception as e:
-                self.log(f"[remote plan error] {e}")
+                self.log(f"[远程计划错误] {e}")
 
         threading.Thread(target=work, daemon=True).start()
     # <<< NEW
