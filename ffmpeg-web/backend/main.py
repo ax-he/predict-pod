@@ -225,12 +225,27 @@ def build_pipeline_args(op: str, P: Dict[str, str]):
     vf_arg = ["-vf", ",".join(vf)] if vf else []
     return vf_arg + vcodec + aargs
 
-def run_sample(input_path: str, pipeline_args, duration_full: float, sample_secs: int, op_name: str):
+def run_sample(input_path: str, full_cmd_args, duration_full: float, sample_secs: int, op_name: str):
     _ensure_bins()
+    # full_cmd_args 应该是一个完整的命令列表，包括所有必要的输入和参数
     cmd = [FFMPEG,"-y"]
+
+    # 处理中间采样逻辑（仅对非快速剪辑操作）
     if MID_SAMPLE and duration_full > sample_secs * 3 and not op_name.startswith("2) Fast Trim"):
-        start = max(0.0, duration_full * 0.2); cmd += ["-ss", f"{start:.2f}"]
-    cmd += ["-t", str(sample_secs), "-i", input_path] + pipeline_args + ["-f","null","-","-v","quiet","-stats"]
+        # 在第一个输入文件之前插入 -ss 参数
+        start = max(0.0, duration_full * 0.2)
+        # 找到第一个 -i 参数的位置
+        try:
+            input_idx = full_cmd_args.index("-i")
+            cmd.extend(full_cmd_args[:input_idx])
+            cmd.extend(["-ss", f"{start:.2f}"])
+            cmd.extend(full_cmd_args[input_idx:])
+        except ValueError:
+            # 如果没有找到 -i 参数，回退到原有逻辑
+            cmd += ["-ss", f"{start:.2f}"] + full_cmd_args
+    else:
+        cmd.extend(full_cmd_args)
+
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **POPENC)
     _, err = p.communicate()
     sp = parse_speed_from_ffmpeg(err or "")
@@ -268,6 +283,9 @@ def build_real_run_cmd(input_path: str, output_path: str, op: str, P: Dict[str,s
         inputs = ["-i", input_path, "-i", P["overlay"]]
     if op == "6) Soft Subtitles (mov_text)":
         if not P.get("subs"): raise RuntimeError("Subtitles .srt required.")
+        inputs = ["-i", input_path, "-i", P["subs"]]
+    if op == "6) Hard Subtitles (burn-in)":
+        if not P.get("subs"): raise RuntimeError("Subtitles .srt required for hard subtitles.")
         inputs = ["-i", input_path, "-i", P["subs"]]
     after_inputs = []
     if op.startswith("2) Precise Trim"):
@@ -316,6 +334,53 @@ def api_ffprobe(file_id: str):
     info = ffprobe_info(path)
     return info
 
+# @app.post("/estimate")
+# def api_estimate(
+#     file_id: str = Form(...),
+#     operation: str = Form(...),
+#     params_json: str = Form(...),
+# ):
+#     path = str(UPLOAD_DIR / file_id)
+#     P = json.loads(params_json)
+#     info = ffprobe_info(path)
+#     pipeline = build_pipeline_args(operation, P)
+#     speed, sample_cmd = run_sample(path, pipeline, info["duration"], int(P.get("sample_secs", SAMPLE_SECS_DEFAULT)), operation)
+#     eta = estimate_total_seconds(info["duration"], speed, float(P.get("safety", SAFETY_DEFAULT)), operation)
+#     return {
+#         "ffprobe": {"duration": info["duration"]},
+#         "sample_speed_x": round(speed, 3),
+#         "sample_cmd": sample_cmd,
+#         "eta_seconds": eta,
+#         "eta_hms": pretty_time(eta)
+#     }
+
+
+def _ensure_encode_pipeline(op: str, P: dict, pipeline: list) -> list:
+    """
+    若 pipeline 缺少编码参数，则按 P 或默认值补齐，使采样时真正执行“解码+重编码”。
+    仅在纯 Trim 时放行空管线（估时另行处理）。
+    """
+    if op.startswith("2) Fast Trim") or op.startswith("2) Precise Trim"):
+        return pipeline
+
+    has_v = any(k in pipeline for k in ("-c:v", "-vn"))
+    has_a = any(k in pipeline for k in ("-c:a", "-an"))
+    if has_v and has_a:
+        return pipeline
+
+    vcodec   = P.get("vcodec", "libx264")
+    crf      = str(P.get("crf", 23))
+    preset   = P.get("preset", "medium")
+    acodec   = P.get("acodec", "aac")
+    a_bitrate= str(P.get("audio_bitrate", "128k"))
+
+    fixed = list(pipeline)
+    if not has_v:
+        fixed += ["-c:v", vcodec, "-crf", crf, "-preset", preset]
+    if not has_a:
+        fixed += ["-c:a", acodec, "-b:a", a_bitrate]
+    return fixed
+
 @app.post("/estimate")
 def api_estimate(
     file_id: str = Form(...),
@@ -324,16 +389,70 @@ def api_estimate(
 ):
     path = str(UPLOAD_DIR / file_id)
     P = json.loads(params_json)
+
     info = ffprobe_info(path)
+
+    # 1) 与 GUI 一致：构造 trim 前缀（采样仍保持 -t 窗口）
+    trim_prefix = []
+    if operation.startswith("2) Fast Trim") or operation.startswith("2) Precise Trim"):
+        if P.get("ss"): trim_prefix += ["-ss", P["ss"]]
+        if P.get("to"): trim_prefix += ["-to", P["to"]]
+
+    # 2) 管线参数，并强制补齐编码项
     pipeline = build_pipeline_args(operation, P)
-    speed, sample_cmd = run_sample(path, pipeline, info["duration"], int(P.get("sample_secs", SAMPLE_SECS_DEFAULT)), operation)
-    eta = estimate_total_seconds(info["duration"], speed, float(P.get("safety", SAFETY_DEFAULT)), operation)
+    pipeline = _ensure_encode_pipeline(operation, P, pipeline)
+
+    # 3) 构建完整的采样命令（与实际运行命令逻辑一致）
+    sample_secs = int(P.get("sample_secs", SAMPLE_SECS_DEFAULT))
+
+    # 构建采样命令的基础部分
+    base = [FFMPEG, "-y"]
+
+    # 处理剪辑前缀（仅用于非快速剪辑的中间采样）
+    if trim_prefix and MID_SAMPLE and info["duration"] > sample_secs * 3 and not operation.startswith("2) Fast Trim"):
+        base += trim_prefix
+
+    base += ["-t", str(sample_secs)]
+
+    # 添加输入文件
+    inputs = ["-i", path]
+
+    # 处理额外的输入文件
+    if operation == "4) Overlay Watermark (PNG at 10,10)":
+        if not P.get("overlay"): raise RuntimeError("Overlay PNG required.")
+        inputs = ["-i", path, "-i", P["overlay"]]
+    elif operation == "6) Soft Subtitles (mov_text)":
+        if not P.get("subs"): raise RuntimeError("Subtitles .srt required.")
+        inputs = ["-i", path, "-i", P["subs"]]
+    elif operation == "6) Hard Subtitles (burn-in)":
+        if not P.get("subs"): raise RuntimeError("Subtitles .srt required for hard subtitles.")
+        inputs = ["-i", path, "-i", P["subs"]]
+
+    # 组合完整命令
+    full_cmd_args = base + inputs + pipeline + ["-f", "null", "-", "-v", "quiet", "-stats"]
+
+    # 用于日志显示的命令片段
+    sample_cmd_snippet = " ".join(shlex.quote(x) for x in full_cmd_args[:20]) + \
+                         (" ..." if len(full_cmd_args) > 20 else "")
+
+    # 4) 实际执行采样
+    speed, sample_cmd = run_sample(
+        path, full_cmd_args, info["duration"], sample_secs, operation
+    )
+
+    # 5) 估时（如需，可把 IO 惩罚做成可选参数再乘上）
+    safety = float(P.get("safety", SAFETY_DEFAULT))
+    eta = estimate_total_seconds(info["duration"], speed, safety, operation)
+
     return {
-        "ffprobe": {"duration": info["duration"]},
-        "sample_speed_x": round(speed, 3),
+        "ffprobe": info,
+        # UI 需要这个字段名
         "sample_cmd": sample_cmd,
+        # 也返回片段，便于界面展示
+        "sample_cmd_snippet": sample_cmd_snippet,
+        "sample_speed_x": round(speed, 3),
         "eta_seconds": eta,
-        "eta_hms": pretty_time(eta)
+        "eta_hms": pretty_time(eta),
     }
 
 @app.post("/run_local")
