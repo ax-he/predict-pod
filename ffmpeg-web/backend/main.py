@@ -225,27 +225,12 @@ def build_pipeline_args(op: str, P: Dict[str, str]):
     vf_arg = ["-vf", ",".join(vf)] if vf else []
     return vf_arg + vcodec + aargs
 
-def run_sample(input_path: str, full_cmd_args, duration_full: float, sample_secs: int, op_name: str):
+def run_sample(input_path: str, pipeline_args, duration_full: float, sample_secs: int, op_name: str):
     _ensure_bins()
-    # full_cmd_args 应该是一个完整的命令列表，包括所有必要的输入和参数
     cmd = [FFMPEG,"-y"]
-
-    # 处理中间采样逻辑（仅对非快速剪辑操作）
     if MID_SAMPLE and duration_full > sample_secs * 3 and not op_name.startswith("2) Fast Trim"):
-        # 在第一个输入文件之前插入 -ss 参数
-        start = max(0.0, duration_full * 0.2)
-        # 找到第一个 -i 参数的位置
-        try:
-            input_idx = full_cmd_args.index("-i")
-            cmd.extend(full_cmd_args[:input_idx])
-            cmd.extend(["-ss", f"{start:.2f}"])
-            cmd.extend(full_cmd_args[input_idx:])
-        except ValueError:
-            # 如果没有找到 -i 参数，回退到原有逻辑
-            cmd += ["-ss", f"{start:.2f}"] + full_cmd_args
-    else:
-        cmd.extend(full_cmd_args)
-
+        start = max(0.0, duration_full * 0.2); cmd += ["-ss", f"{start:.2f}"]
+    cmd += ["-t", str(sample_secs), "-i", input_path] + pipeline_args + ["-f","null","-","-v","quiet","-stats"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **POPENC)
     _, err = p.communicate()
     sp = parse_speed_from_ffmpeg(err or "")
@@ -402,42 +387,28 @@ def api_estimate(
     pipeline = build_pipeline_args(operation, P)
     pipeline = _ensure_encode_pipeline(operation, P, pipeline)
 
-    # 3) 构建完整的采样命令（与实际运行命令逻辑一致）
+    # 3) 采样命令片段（用于日志/回显；实际执行仍用 run_sample）
     sample_secs = int(P.get("sample_secs", SAMPLE_SECS_DEFAULT))
+    if trim_prefix:
+        sample_cmd_base = ["ffmpeg"] + trim_prefix + ["-t", str(sample_secs)]
+    else:
+        sample_cmd_base = ["ffmpeg", "-t", str(sample_secs)]
+    sample_cmd_base += ["-i", path]
 
-    # 构建采样命令的基础部分
-    base = [FFMPEG, "-y"]
+    if operation == "4) Overlay Watermark (PNG at 10,10)" and P.get("overlay"):
+        sample_cmd_base = sample_cmd_base[:-3] + ["-i", P["overlay"]] + sample_cmd_base[-3:]
+    if operation == "6) Soft Subtitles (mov_text)" and P.get("subs"):
+        sample_cmd_base = sample_cmd_base[:-3] + ["-i", P["subs"]] + sample_cmd_base[-3:]
+    if operation == "6) Hard Subtitles (burn-in)" and P.get("subs"):
+        sample_cmd_base = sample_cmd_base[:-3] + ["-i", P["subs"]] + sample_cmd_base[-3:]
 
-    # 处理剪辑前缀（仅用于非快速剪辑的中间采样）
-    if trim_prefix and MID_SAMPLE and info["duration"] > sample_secs * 3 and not operation.startswith("2) Fast Trim"):
-        base += trim_prefix
+    full_cmd_preview = sample_cmd_base + pipeline + ["-f", "null", "-", "-v", "quiet", "-stats"]
+    sample_cmd_snippet = " ".join(shlex.quote(x) for x in full_cmd_preview[:20]) + \
+                         (" ..." if len(full_cmd_preview) > 20 else "")
 
-    base += ["-t", str(sample_secs)]
-
-    # 添加输入文件
-    inputs = ["-i", path]
-
-    # 处理额外的输入文件
-    if operation == "4) Overlay Watermark (PNG at 10,10)":
-        if not P.get("overlay"): raise RuntimeError("Overlay PNG required.")
-        inputs = ["-i", path, "-i", P["overlay"]]
-    elif operation == "6) Soft Subtitles (mov_text)":
-        if not P.get("subs"): raise RuntimeError("Subtitles .srt required.")
-        inputs = ["-i", path, "-i", P["subs"]]
-    elif operation == "6) Hard Subtitles (burn-in)":
-        if not P.get("subs"): raise RuntimeError("Subtitles .srt required for hard subtitles.")
-        inputs = ["-i", path, "-i", P["subs"]]
-
-    # 组合完整命令
-    full_cmd_args = base + inputs + pipeline + ["-f", "null", "-", "-v", "quiet", "-stats"]
-
-    # 用于日志显示的命令片段
-    sample_cmd_snippet = " ".join(shlex.quote(x) for x in full_cmd_args[:20]) + \
-                         (" ..." if len(full_cmd_args) > 20 else "")
-
-    # 4) 实际执行采样
+    # 4) 实际执行采样（Windows 版 run_sample 返回 (speed, cmd_str)）
     speed, sample_cmd = run_sample(
-        path, full_cmd_args, info["duration"], sample_secs, operation
+        path, pipeline, info["duration"], sample_secs, operation
     )
 
     # 5) 估时（如需，可把 IO 惩罚做成可选参数再乘上）
