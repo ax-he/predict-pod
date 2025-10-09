@@ -243,26 +243,30 @@
 </fieldset>
 
 <script>
-const OPS = [
-  "1) H.264 CRF Transcode",
-  "1) H.265 CRF Transcode (Slow)",
-  "1) Remux (No Re-encode)",
-  "2) Fast Trim (no re-encode, keyframe aligned)",
-  "2) Precise Trim (re-encode)",
-  "3) Scale+FPS (CRF quality)",
-  "3) Two-pass Target Bitrate",
-  "4) Overlay Watermark (PNG at 10,10)",
-  "4) Denoise (hqdn3d) + Transcode",
-  "5) Loudness Normalize (EBU R128 loudnorm)",
-  "6) Soft Subtitles (mov_text)",
-  "6) Hard Subtitles (burn-in)",
-  "7) Thumbnail Grid (fps=1, 5x4)",
-  "7) GIF (fps=10, width=480)",
-  "8) HDR->SDR Tonemap (zscale+tonemap)",
-  "9) HLS VOD Segments",
-  "9) RTMP Live Stream",
-  "10) Screen/Device Capture (note)"
-];
+// 操作名称映射：英文值 => 中文显示
+const OP_LABELS = {
+  "1) H.264 CRF Transcode": "1) H.264 CRF 转码",
+  "1) H.265 CRF Transcode (Slow)": "1) H.265 CRF 转码 (较慢)",
+  "1) Remux (No Re-encode)": "1) 封装转换 (不重新编码)",
+  "2) Fast Trim (no re-encode, keyframe aligned)": "2) 快速剪辑 (不重编码，关键帧对齐)",
+  "2) Precise Trim (re-encode)": "2) 精确剪辑 (需要重编码)",
+  "3) Scale+FPS (CRF quality)": "3) 缩放+帧率 (CRF质量)",
+  "3) Two-pass Target Bitrate": "3) 两遍编码目标码率",
+  "4) Overlay Watermark (PNG at 10,10)": "4) 叠加水印 (PNG位于10,10)",
+  "4) Denoise (hqdn3d) + Transcode": "4) 降噪 (hqdn3d) + 转码",
+  "5) Loudness Normalize (EBU R128 loudnorm)": "5) 音量标准化 (EBU R128 loudnorm)",
+  "6) Soft Subtitles (mov_text)": "6) 软字幕 (mov_text)",
+  "6) Hard Subtitles (burn-in)": "6) 硬字幕 (烧入视频)",
+  "7) Thumbnail Grid (fps=1, 5x4)": "7) 缩略图网格 (fps=1, 5x4)",
+  "7) GIF (fps=10, width=480)": "7) GIF动图 (fps=10, 宽度=480)",
+  "8) HDR->SDR Tonemap (zscale+tonemap)": "8) HDR转SDR色调映射 (zscale+tonemap)",
+  "9) HLS VOD Segments": "9) HLS点播分片",
+  "9) RTMP Live Stream": "9) RTMP直播推流",
+  "10) Screen/Device Capture (note)": "10) 屏幕/设备采集 (说明)"
+};
+
+// 实际传递给后端的英文操作名称数组
+const OPS = Object.keys(OP_LABELS);
 let lastFileId = null;
 let lastETASeconds = 0;
 
@@ -287,7 +291,12 @@ function clearOutput(){ byId('output').value = ""; }
 
 (function fillOps(){
   const sel = byId('operation');
-  OPS.forEach(op => { const o = document.createElement('option'); o.textContent = op; sel.appendChild(o); });
+  OPS.forEach(op => {
+    const o = document.createElement('option');
+    o.value = op;  // value保持英文，用于后端匹配
+    o.textContent = OP_LABELS[op];  // 显示中文标签
+    sel.appendChild(o);
+  });
 })();
 
 function apiBase(){ return byId('baseUrl').value.replace(/\/+$/,''); }
@@ -337,6 +346,7 @@ async function estimate(){
     log("采样速度倍数 = " + j.sample_speed_x);
     log("采样命令: " + j.sample_cmd);
     log("预估时间: " + j.eta_hms + " (" + j.eta_seconds.toFixed(1) + " 秒)");
+    log("操作类型: " + OP_LABELS[byId('operation').value]);
   }else{
     log("预估错误: "+JSON.stringify(j));
   }
@@ -352,6 +362,7 @@ async function runLocal(){
 
   // 先清一行提示
   log("=== 本地运行 (流式输出) ===");
+  log("操作类型: " + OP_LABELS[byId('operation').value]);
 
   // 用 fetch 读取流式响应，逐块追加到输出框
   const r = await fetch(apiBase()+"/run_local_stream", {method:'POST', body:fd});
@@ -407,6 +418,7 @@ async function runRemote(){
   const j = await r.json();
   if(r.ok){
     log("=== 上传并远程运行 (存根) ===");
+    log("操作类型: " + OP_LABELS[byId('operation').value]);
     log("上传:\n  "+j.plan.upload.join("\n  "));
     log("运行:\n  "+j.plan.run);
     log("下载:\n  "+j.plan.download);
