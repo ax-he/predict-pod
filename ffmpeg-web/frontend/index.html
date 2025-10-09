@@ -244,24 +244,24 @@
 
 <script>
 const OPS = [
-  "1) H.264 CRF 转码",
-  "1) H.265 CRF 转码 (较慢)",
-  "1) 封装转换 (不重新编码)",
-  "2) 快速剪辑 (不重编码，关键帧对齐)",
-  "2) 精确剪辑 (需要重编码)",
-  "3) 缩放+帧率 (CRF质量)",
-  "3) 两遍编码目标码率",
-  "4) 叠加水印 (PNG位于10,10)",
-  "4) 降噪 (hqdn3d) + 转码",
-  "5) 音量标准化 (EBU R128 loudnorm)",
-  "6) 软字幕 (mov_text)",
-  "6) 硬字幕 (烧入视频)",
-  "7) 缩略图网格 (fps=1, 5x4)",
-  "7) GIF动图 (fps=10, 宽度=480)",
-  "8) HDR转SDR色调映射 (zscale+tonemap)",
-  "9) HLS点播分片",
-  "9) RTMP直播推流",
-  "10) 屏幕/设备采集 (说明)"
+  "1) H.264 CRF Transcode",
+  "1) H.265 CRF Transcode (Slow)",
+  "1) Remux (No Re-encode)",
+  "2) Fast Trim (no re-encode, keyframe aligned)",
+  "2) Precise Trim (re-encode)",
+  "3) Scale+FPS (CRF quality)",
+  "3) Two-pass Target Bitrate",
+  "4) Overlay Watermark (PNG at 10,10)",
+  "4) Denoise (hqdn3d) + Transcode",
+  "5) Loudness Normalize (EBU R128 loudnorm)",
+  "6) Soft Subtitles (mov_text)",
+  "6) Hard Subtitles (burn-in)",
+  "7) Thumbnail Grid (fps=1, 5x4)",
+  "7) GIF (fps=10, width=480)",
+  "8) HDR->SDR Tonemap (zscale+tonemap)",
+  "9) HLS VOD Segments",
+  "9) RTMP Live Stream",
+  "10) Screen/Device Capture (note)"
 ];
 let lastFileId = null;
 let lastETASeconds = 0;
@@ -306,7 +306,7 @@ async function probe(){
   if(!lastFileId){ alert("请先上传文件"); return; }
   const r = await fetch(apiBase()+"/ffprobe?file_id="+encodeURIComponent(lastFileId));
   const j = await r.json();
-  log("=== ffprobe ===\n"+JSON.stringify(j,null,2));
+  log("=== 视频探测信息 ===\n"+JSON.stringify(j,null,2));
 }
 
 function gatherParams(){
@@ -333,12 +333,12 @@ async function estimate(){
   const j = await r.json();
   if(r.ok){
     lastETASeconds = j.eta_seconds || 0;
-    log("=== Estimate ===");
-    log("Sample speed x = " + j.sample_speed_x);
-    log("Sample cmd: " + j.sample_cmd);
-    log("ETA: " + j.eta_hms + " (" + j.eta_seconds.toFixed(1) + " s)");
+    log("=== 预估时间 ===");
+    log("采样速度倍数 = " + j.sample_speed_x);
+    log("采样命令: " + j.sample_cmd);
+    log("预估时间: " + j.eta_hms + " (" + j.eta_seconds.toFixed(1) + " 秒)");
   }else{
-    log("Estimate error: "+JSON.stringify(j));
+    log("预估错误: "+JSON.stringify(j));
   }
 }
 
@@ -351,13 +351,13 @@ async function runLocal(){
   fd.append("last_eta_seconds", lastETASeconds);
 
   // 先清一行提示
-  log("=== Run Locally (stream) ===");
+  log("=== 本地运行 (流式输出) ===");
 
   // 用 fetch 读取流式响应，逐块追加到输出框
   const r = await fetch(apiBase()+"/run_local_stream", {method:'POST', body:fd});
   if(!r.ok){
     const msg = await r.text();
-    log("Run error: " + msg);
+    log("运行错误: " + msg);
     return;
   }
 
@@ -381,7 +381,7 @@ async function runLocal(){
         try {
           const j = JSON.parse(line.slice("=== SUMMARY === ".length));
           if (j && j.comparison) {
-            log(`ETA vs Actual: ${j.comparison.eta_hms} → ${j.comparison.actual_hms} (${j.comparison.diff_seconds>0?"+":""}${j.comparison.diff_seconds.toFixed(1)} s, ${(j.comparison.diff_percent>0?"+":"")}${j.comparison.diff_percent.toFixed(1)}%)`);
+            log(`预估 vs 实际: ${j.comparison.eta_hms} → ${j.comparison.actual_hms} (${j.comparison.diff_seconds>0?"+":""}${j.comparison.diff_seconds.toFixed(1)} 秒, ${(j.comparison.diff_percent>0?"+":"")}${j.comparison.diff_percent.toFixed(1)}%)`);
           }
         } catch (e) {
           // ignore parse error
@@ -406,14 +406,14 @@ async function runRemote(){
   const r = await fetch(apiBase()+"/run_remote_stub", {method:'POST', body:fd});
   const j = await r.json();
   if(r.ok){
-    log("=== Upload & Run (remote) — STUB ===");
-    log("Upload:\n  "+j.plan.upload.join("\n  "));
-    log("Run:\n  "+j.plan.run);
-    log("Download:\n  "+j.plan.download);
-    if(j.reference_eta) log("Reference ETA: "+j.reference_eta.eta_hms);
+    log("=== 上传并远程运行 (存根) ===");
+    log("上传:\n  "+j.plan.upload.join("\n  "));
+    log("运行:\n  "+j.plan.run);
+    log("下载:\n  "+j.plan.download);
+    if(j.reference_eta) log("参考预估时间: "+j.reference_eta.eta_hms);
     log(j.note);
   }else{
-    log("Remote plan error: "+JSON.stringify(j));
+    log("远程计划错误: "+JSON.stringify(j));
   }
 }
 </script>
