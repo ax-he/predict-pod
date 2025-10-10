@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import os, io, json, shlex, time, datetime, pathlib, subprocess, tempfile, shutil, sys
 from typing import Optional, Dict, Any
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
@@ -420,7 +420,41 @@ def api_estimate(
 
     # 5) 估时（如需，可把 IO 惩罚做成可选参数再乘上）
     safety = float(P.get("safety", SAFETY_DEFAULT))
-    eta = estimate_total_seconds(info["duration"], speed, safety, operation)
+
+    # 对于剪辑操作，需要计算实际的剪辑时长
+    actual_duration = info["duration"]
+    if operation.startswith("2) Fast Trim") or operation.startswith("2) Precise Trim"):
+        ss = P.get("ss")
+        to = P.get("to")
+        if ss and to:
+            # 解析时间格式 (HH:MM:SS 或 MM:SS 或 SS)
+            try:
+                if ':' in ss:
+                    if ss.count(':') == 2:  # HH:MM:SS
+                        ss_seconds = sum(x * float(t) for x, t in zip([3600, 60, 1], ss.split(':')))
+                    else:  # MM:SS
+                        ss_seconds = sum(x * float(t) for x, t in zip([60, 1], ss.split(':')))
+                else:
+                    ss_seconds = float(ss)
+
+                if ':' in to:
+                    if to.count(':') == 2:  # HH:MM:SS
+                        to_seconds = sum(x * float(t) for x, t in zip([3600, 60, 1], to.split(':')))
+                    else:  # MM:SS
+                        to_seconds = sum(x * float(t) for x, t in zip([60, 1], to.split(':')))
+                else:
+                    to_seconds = float(to)
+
+                # 计算剪辑的实际时长
+                if to_seconds > ss_seconds:
+                    actual_duration = to_seconds - ss_seconds
+                else:
+                    actual_duration = info["duration"] - ss_seconds  # 如果结束时间无效，只剪辑从开始时间到结尾
+            except (ValueError, IndexError):
+                # 如果时间格式解析失败，使用整个视频时长
+                actual_duration = info["duration"]
+
+    eta = estimate_total_seconds(actual_duration, speed, safety, operation)
 
     return {
         "ffprobe": info,
@@ -431,6 +465,7 @@ def api_estimate(
         "sample_speed_x": round(speed, 3),
         "eta_seconds": eta,
         "eta_hms": pretty_time(eta),
+        "actual_duration": actual_duration,  # 添加实际剪辑时长
     }
 
 @app.post("/run_local")

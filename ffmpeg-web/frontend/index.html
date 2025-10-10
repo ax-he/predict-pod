@@ -304,6 +304,16 @@ function byId(id){return document.getElementById(id)}
 function log(s){ const ta = byId('output'); ta.value += s + "\n"; ta.scrollTop = ta.scrollHeight; }
 function clearOutput(){ byId('output').value = ""; }
 
+function pretty_time(t_seconds) {
+  const t = Math.round(t_seconds);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 async function clearUploads(){
   // if(!confirm("⚠️ 警告：此操作将永久删除 uploads/ 文件夹中的所有文件！\n\n此操作不可撤销，确定要继续吗？")){
   if(!confirm("警告：此操作将永久删除上传文件夹中的所有文件！\n此操作不可撤销，确定要继续吗？")){
@@ -406,6 +416,10 @@ async function estimate(){
     log("=== 预估时间 ===");
     log("采样速度倍数 = " + j.sample_speed_x);
     log("采样命令: " + j.sample_cmd);
+    if(j.actual_duration && j.actual_duration !== j.ffprobe.duration){
+      log("剪辑时长: " + pretty_time(j.actual_duration) + " (" + j.actual_duration.toFixed(1) + " 秒)");
+      log("原视频时长: " + pretty_time(j.ffprobe.duration) + " (" + j.ffprobe.duration.toFixed(1) + " 秒)");
+    }
     log("预估时间: " + j.eta_hms + " (" + j.eta_seconds.toFixed(1) + " 秒)");
     log("操作类型: " + OP_LABELS[byId('operation').value]);
   }else{
