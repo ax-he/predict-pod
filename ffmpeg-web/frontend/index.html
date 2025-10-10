@@ -137,6 +137,19 @@
     outline-offset: 2px;
   }
 
+  .btn.danger {
+    background: #ff4444;                /* 红色背景表示危险操作 */
+    border-color: #cc0000;
+  }
+
+  .btn.danger:hover {
+    background: #ee2222;
+  }
+
+  .btn.danger:active {
+    background: #dd1111;
+  }
+
   /* 禁用态（如需） */
   .btn[disabled],
   label.btn[aria-disabled="true"] {
@@ -169,12 +182,24 @@
 </div>
 
 <fieldset>
-<legend>1) 选择视频文件</legend>
+<legend>1) 上传视频</legend>
+<!-- <div class="row">
+  <input id="fileInput" type="file" accept="video/*" />
+  <div class="file-wrapper">
+  <label class="file-btn">
+    选择文件
+    <input id="fileInput" type="file" class="file-input" onchange="showFileName()" accept="video/*" />
+  </label>
+</div>
+  <button class="btn" onclick="upload()">上传</button>
+  <span id="fileIdSpan" class="hint"></span>
+</div> -->
 <div class="row">
   <!-- 用 label 触发隐藏的 file input -->
   <label id="chooseLabel" for="fileInput" class="btn">选择文件</label>
   <input id="fileInput" type="file" class="file-offscreen" onchange="showFileName()" accept="video/*" />
-  <span id="filePathSpan" class="hint"></span>
+  <button type="button" class="btn" onclick="upload()">上传</button>
+  <span id="fileIdSpan" class="hint"></span>
 </div>
 </fieldset>
 
@@ -223,6 +248,8 @@
   <button class="btn" onclick="runLocal()">(3) 本地运行</button>
   <button class="btn" onclick="runRemote()">(4) 上传并远程运行</button>
   <button class="btn" onclick="clearOutput()">(5) 清空输出</button>
+  <!-- <button class="btn danger" onclick="clearUploads()">(6) 清空上传</button> -->
+  <button class="btn" onclick="clearUploads()">(6) 清空上传</button>
 </div>
 
 <fieldset id="output-fieldset">
@@ -255,42 +282,55 @@ const OP_LABELS = {
 
 // 实际传递给后端的英文操作名称数组
 const OPS = Object.keys(OP_LABELS);
-let lastFilePath = null;
+let lastFileId = null;
 let lastETASeconds = 0;
 
 function showFileName() {
   const input = document.getElementById('fileInput');
-  const span  = document.getElementById('filePathSpan');
+  const span  = document.getElementById('fileIdSpan');
   const label = document.getElementById('chooseLabel');
   if (input.files && input.files.length > 0) {
     const f = input.files[0];
     const mb = (f.size/1024/1024).toFixed(1);
-    // 显示文件信息，但不显示路径（浏览器安全限制）
     span.textContent = `已选择: ${f.name} (${mb} MB)`;
     label.textContent = '重新选择';
-
-    // 提示用户手动输入完整路径
-    const fullPath = prompt(`请输入文件 "${f.name}" 的完整路径（例如：C:\\Users\\username\\Videos\\video.mp4）：`);
-    if (fullPath && fullPath.trim()) {
-      lastFilePath = fullPath.trim();
-      span.textContent += ` - 路径已设置`;
-    } else {
-      lastFilePath = null;
-      alert("需要提供完整的文件路径才能继续操作");
-      input.value = ''; // 清空选择
-      span.textContent = '';
-      label.textContent = '选择文件';
-    }
   } else {
     span.textContent = '';
     label.textContent = '选择文件';
-    lastFilePath = null;
   }
 }
 
 function byId(id){return document.getElementById(id)}
 function log(s){ const ta = byId('output'); ta.value += s + "\n"; ta.scrollTop = ta.scrollHeight; }
 function clearOutput(){ byId('output').value = ""; }
+
+async function clearUploads(){
+  // if(!confirm("⚠️ 警告：此操作将永久删除 uploads/ 文件夹中的所有文件！\n\n此操作不可撤销，确定要继续吗？")){
+  if(!confirm("警告：此操作将永久删除上传文件夹中的所有文件！\n此操作不可撤销，确定要继续吗？")){
+    return;
+  }
+
+  try {
+    const r = await fetch(apiBase()+"/clear_uploads", {method:'POST'});
+    const j = await r.json();
+
+    if(r.ok){
+      log("=== 清空上传文件夹 ===");
+      // log("✅ " + j.message);
+      // log(`📁 删除了 ${j.deleted_count} 个文件`);
+      log(j.message);
+      // 清空当前文件ID，因为文件已被删除
+      lastFileId = null;
+      byId('fileIdSpan').textContent = '';
+    } else {
+      // log("❌ 清空上传文件夹失败: " + JSON.stringify(j));
+      log("清空上传文件夹失败: " + JSON.stringify(j));
+    }
+  } catch (error) {
+    // log("❌ 清空上传文件夹出错: " + error.message);
+    log("清空上传文件夹出错: " + error.message);
+  }
+}
 
 (function fillOps(){
   const sel = byId('operation');
@@ -304,11 +344,37 @@ function clearOutput(){ byId('output').value = ""; }
 
 function apiBase(){ return byId('baseUrl').value.replace(/\/+$/,''); }
 
-// upload() 函数已被移除，现在直接使用文件路径
+async function upload(){
+  const f = byId('fileInput').files[0];
+  if(!f){ alert("请选择文件"); return; }
+
+  // 前端简单检查文件类型
+  const allowedExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.3g2', '.mpeg', '.mpg'];
+  const fileExtension = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
+
+  if(!allowedExtensions.includes(fileExtension)){
+    alert(`不支持的文件类型: ${fileExtension}。请选择视频文件。`);
+    return;
+  }
+
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch(apiBase()+"/upload", {method:'POST', body:fd});
+  const j = await r.json();
+  if(r.ok){
+    lastFileId = j.file_id;
+    byId('fileIdSpan').textContent = "已上传: " + j.file_id;
+    log("上传完成: " + JSON.stringify(j));
+  } else {
+    log("上传失败: " + (j.detail || JSON.stringify(j)));
+    if(j.detail && j.detail.includes("不支持的文件类型")){
+      alert("上传失败：请选择有效的视频文件格式。");
+    }
+  }
+}
 
 async function probe(){
-  if(!lastFilePath){ alert("请选择文件"); return; }
-  const r = await fetch(apiBase()+"/ffprobe?file_path="+encodeURIComponent(lastFilePath));
+  if(!lastFileId){ alert("请先上传文件"); return; }
+  const r = await fetch(apiBase()+"/ffprobe?file_id="+encodeURIComponent(lastFileId));
   const j = await r.json();
   log("=== 视频探测信息 ===\n"+JSON.stringify(j,null,2));
 }
@@ -328,9 +394,9 @@ function gatherParams(){
 }
 
 async function estimate(){
-  if(!lastFilePath){ alert("请选择文件"); return; }
+  if(!lastFileId){ alert("请先上传文件"); return; }
   const fd = new FormData();
-  fd.append("file_path", lastFilePath);
+  fd.append("file_id", lastFileId);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   const r = await fetch(apiBase()+"/estimate", {method:'POST', body:fd});
@@ -348,9 +414,9 @@ async function estimate(){
 }
 
 async function runLocal(){
-  if(!lastFilePath){ alert("请选择文件"); return; }
+  if(!lastFileId){ alert("请先上传文件"); return; }
   const fd = new FormData();
-  fd.append("file_path", lastFilePath);
+  fd.append("file_id", lastFileId);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);
@@ -403,9 +469,9 @@ async function runLocal(){
 }
 
 async function runRemote(){
-  if(!lastFilePath){ alert("请选择文件"); return; }
+  if(!lastFileId){ alert("请先上传文件"); return; }
   const fd = new FormData();
-  fd.append("file_path", lastFilePath);
+  fd.append("file_id", lastFileId);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);

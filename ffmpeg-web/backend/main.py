@@ -101,40 +101,6 @@ def pretty_time(t_seconds: float) -> str:
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def validate_file_path(file_path: str) -> bool:
-    """
-    验证文件路径安全性：
-    1. 路径不能为空
-    2. 文件必须存在
-    3. 路径应该是绝对路径（防止路径遍历攻击）
-    4. 文件应该是视频文件（基于扩展名简单检查）
-    5. 文件大小不能过大（防止资源耗尽攻击）
-    """
-    if not file_path:
-        return False
-
-    path = pathlib.Path(file_path)
-
-    # 检查是否是绝对路径（防止路径遍历）
-    if not path.is_absolute():
-        return False
-
-    # 检查文件是否存在
-    if not path.exists() or not path.is_file():
-        return False
-
-    # 检查文件扩展名（简单的视频文件类型检查）
-    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.3g2'}
-    if path.suffix.lower() not in video_extensions:
-        return False
-
-    # 检查文件大小（限制为 10GB）
-    max_size = 10 * 1024 * 1024 * 1024  # 10GB
-    if path.stat().st_size > max_size:
-        return False
-
-    return True
-
 # ---------------- Core: ffprobe / ops ----------------
 def ffprobe_info(path: str) -> Dict[str, Any]:
     _ensure_bins()
@@ -339,13 +305,25 @@ def health():
         "platform": sys.platform,
     }
 
-# /upload 接口已被移除，现在直接使用文件路径
+@app.post("/upload")
+def upload(file: UploadFile = File(...)):
+    # 检查文件类型是否为视频文件
+    allowed_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.3g2', '.mpeg', '.mpg'}
+    file_extension = pathlib.Path(file.filename).suffix.lower()
+
+    if file_extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {file_extension}。只允许视频文件。")
+
+    suffix = pathlib.Path(file.filename).suffix or ".mp4"
+    dst = UPLOAD_DIR / (datetime.datetime.now().strftime("%Y%m%d_%H%M%S_") + pathlib.Path(file.filename).name)
+    with open(dst, "wb") as f:
+        f.write(file.file.read())
+    return {"file_id": dst.name, "path": str(dst)}
 
 @app.get("/ffprobe")
-def api_ffprobe(file_path: str):
-    if not validate_file_path(file_path):
-        return JSONResponse(status_code=400, content={"error": "Invalid or unsafe file path"})
-    info = ffprobe_info(file_path)
+def api_ffprobe(file_id: str):
+    path = str(UPLOAD_DIR / file_id)
+    info = ffprobe_info(path)
     return info
 
 # @app.post("/estimate")
@@ -397,16 +375,14 @@ def _ensure_encode_pipeline(op: str, P: dict, pipeline: list) -> list:
 
 @app.post("/estimate")
 def api_estimate(
-    file_path: str = Form(...),
+    file_id: str = Form(...),
     operation: str = Form(...),
     params_json: str = Form(...),
 ):
-    if not validate_file_path(file_path):
-        return JSONResponse(status_code=400, content={"error": "Invalid or unsafe file path"})
-
+    path = str(UPLOAD_DIR / file_id)
     P = json.loads(params_json)
 
-    info = ffprobe_info(file_path)
+    info = ffprobe_info(path)
 
     # 1) 与 GUI 一致：构造 trim 前缀（采样仍保持 -t 窗口）
     trim_prefix = []
@@ -424,7 +400,7 @@ def api_estimate(
         sample_cmd_base = ["ffmpeg"] + trim_prefix + ["-t", str(sample_secs)]
     else:
         sample_cmd_base = ["ffmpeg", "-t", str(sample_secs)]
-    sample_cmd_base += ["-i", file_path]
+    sample_cmd_base += ["-i", path]
 
     if operation == "4) Overlay Watermark (PNG at 10,10)" and P.get("overlay"):
         sample_cmd_base = sample_cmd_base[:-3] + ["-i", P["overlay"]] + sample_cmd_base[-3:]
@@ -439,7 +415,7 @@ def api_estimate(
 
     # 4) 实际执行采样（Windows 版 run_sample 返回 (speed, cmd_str)）
     speed, sample_cmd = run_sample(
-        file_path, pipeline, info["duration"], sample_secs, operation
+        path, pipeline, info["duration"], sample_secs, operation
     )
 
     # 5) 估时（如需，可把 IO 惩罚做成可选参数再乘上）
@@ -459,29 +435,27 @@ def api_estimate(
 
 @app.post("/run_local")
 def api_run_local(
-    file_path: str = Form(...),
+    file_id: str = Form(...),
     operation: str = Form(...),
     params_json: str = Form(...),
     last_eta_seconds: float = Form(0.0)
 ):
-    if not validate_file_path(file_path):
-        return JSONResponse(status_code=400, content={"error": "Invalid or unsafe file path"})
-
+    path = str(UPLOAD_DIR / file_id)
     P = json.loads(params_json)
 
     if operation == "9) RTMP Live Stream" and not P.get("rtmp_url"):
         return JSONResponse(status_code=400, content={"error":"RTMP URL required."})
 
-    out_path = choose_output_path(file_path, operation)
+    out_path = choose_output_path(path, operation)
     if operation == "9) HLS VOD Segments":
         folder = pathlib.Path(out_path).with_suffix("")
         folder.mkdir(parents=True, exist_ok=True)
         out_path = str(folder / "index.m3u8")
 
     start_ts = now_str(); t0 = time.time()
-    cmd = build_real_run_cmd(file_path, out_path, operation, P)
+    cmd = build_real_run_cmd(path, out_path, operation, P)
     if operation == "9) RTMP Live Stream":
-        cmd = [FFMPEG,"-re","-i", file_path] + build_pipeline_args(operation, P) + ["-f","flv", P["rtmp_url"]]
+        cmd = [FFMPEG,"-re","-i", path] + build_pipeline_args(operation, P) + ["-f","flv", P["rtmp_url"]]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **POPENC)
     out, err = proc.communicate()
@@ -519,7 +493,7 @@ def api_run_local(
 
 @app.post("/run_local_stream")
 def api_run_local_stream(
-    file_path: str = Form(...),
+    file_id: str = Form(...),
     operation: str = Form(...),
     params_json: str = Form(...),
     last_eta_seconds: float = Form(0.0)
@@ -528,23 +502,21 @@ def api_run_local_stream(
     流式返回 ffmpeg 运行日志（实时）。最后会输出一段以 '=== SUMMARY === ' 开头的 JSON 汇总行。
     前端按字节流接收并直接显示。
     """
-    if not validate_file_path(file_path):
-        return JSONResponse(status_code=400, content={"error": "Invalid or unsafe file path"})
-
+    path = str(UPLOAD_DIR / file_id)
     P = json.loads(params_json)
 
     if operation == "9) RTMP Live Stream" and not P.get("rtmp_url"):
         return JSONResponse(status_code=400, content={"error":"RTMP URL required."})
 
-    out_path = choose_output_path(file_path, operation)
+    out_path = choose_output_path(path, operation)
     if operation == "9) HLS VOD Segments":
         folder = pathlib.Path(out_path).with_suffix("")
         folder.mkdir(parents=True, exist_ok=True)
         out_path = str(folder / "index.m3u8")
 
-    cmd = build_real_run_cmd(file_path, out_path, operation, P)
+    cmd = build_real_run_cmd(path, out_path, operation, P)
     if operation == "9) RTMP Live Stream":
-        cmd = [FFMPEG, "-re", "-i", file_path] + build_pipeline_args(operation, P) + ["-f","flv", P["rtmp_url"]]
+        cmd = [FFMPEG, "-re", "-i", path] + build_pipeline_args(operation, P) + ["-f","flv", P["rtmp_url"]]
 
     def line_stream():
         start_ts = now_str()
@@ -626,7 +598,7 @@ def api_run_local_stream(
 
 @app.post("/run_remote_stub")
 def api_run_remote_stub(
-    file_path: str = Form(...),
+    file_id: str = Form(...),
     operation: str = Form(...),
     params_json: str = Form(...),
     last_eta_seconds: float = Form(0.0)
@@ -641,7 +613,7 @@ def api_run_remote_stub(
 
     plan = {
         "upload": [
-            f"scp {shlex.quote(file_path)} REMOTE:REMOTE_DIR/input.mp4",
+            "scp <LOCAL_INPUT> REMOTE:REMOTE_DIR/input.mp4",
         ],
         "run": "ssh REMOTE 'cd REMOTE_DIR && " + " ".join(shlex.quote(str(x)) for x in preview_cmd) + "'",
         "download": "scp REMOTE:REMOTE_DIR/output.* <LOCAL_DIR>/"
@@ -656,6 +628,30 @@ def api_run_remote_stub(
         ref = {"eta_seconds": last_eta_seconds, "eta_hms": pretty_time(last_eta_seconds)}
 
     return {"plan": plan, "reference_eta": ref, "note": "Fill REMOTE / REMOTE_DIR later."}
+
+@app.post("/clear_uploads")
+def clear_uploads():
+    """
+    清空上传文件夹中的所有文件
+    """
+    try:
+        deleted_count = 0
+        if UPLOAD_DIR.exists():
+            for file_path in UPLOAD_DIR.iterdir():
+                if file_path.is_file():
+                    file_path.unlink()
+                    deleted_count += 1
+
+        return {
+            "success": True,
+            "message": f"已删除 {deleted_count} 个上传文件",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"清空上传文件夹失败: {str(e)}"}
+        )
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
