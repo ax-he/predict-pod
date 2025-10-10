@@ -169,24 +169,12 @@
 </div>
 
 <fieldset>
-<legend>1) 上传视频</legend>
-<!-- <div class="row">
-  <input id="fileInput" type="file" />
-  <div class="file-wrapper">
-  <label class="file-btn">
-    选择文件
-    <input id="fileInput" type="file" class="file-input" onchange="showFileName()" />
-  </label>
-</div>
-  <button class="btn" onclick="upload()">上传</button>
-  <span id="fileIdSpan" class="hint"></span>
-</div> -->
+<legend>1) 选择视频文件</legend>
 <div class="row">
   <!-- 用 label 触发隐藏的 file input -->
   <label id="chooseLabel" for="fileInput" class="btn">选择文件</label>
-  <input id="fileInput" type="file" class="file-offscreen" onchange="showFileName()" />
-  <button type="button" class="btn" onclick="upload()">上传</button>
-  <span id="fileIdSpan" class="hint"></span>
+  <input id="fileInput" type="file" class="file-offscreen" onchange="showFileName()" accept="video/*" />
+  <span id="filePathSpan" class="hint"></span>
 </div>
 </fieldset>
 
@@ -267,21 +255,36 @@ const OP_LABELS = {
 
 // 实际传递给后端的英文操作名称数组
 const OPS = Object.keys(OP_LABELS);
-let lastFileId = null;
+let lastFilePath = null;
 let lastETASeconds = 0;
 
 function showFileName() {
   const input = document.getElementById('fileInput');
-  const span  = document.getElementById('fileIdSpan');
+  const span  = document.getElementById('filePathSpan');
   const label = document.getElementById('chooseLabel');
   if (input.files && input.files.length > 0) {
     const f = input.files[0];
     const mb = (f.size/1024/1024).toFixed(1);
+    // 显示文件信息，但不显示路径（浏览器安全限制）
     span.textContent = `已选择: ${f.name} (${mb} MB)`;
     label.textContent = '重新选择';
+
+    // 提示用户手动输入完整路径
+    const fullPath = prompt(`请输入文件 "${f.name}" 的完整路径（例如：C:\\Users\\username\\Videos\\video.mp4）：`);
+    if (fullPath && fullPath.trim()) {
+      lastFilePath = fullPath.trim();
+      span.textContent += ` - 路径已设置`;
+    } else {
+      lastFilePath = null;
+      alert("需要提供完整的文件路径才能继续操作");
+      input.value = ''; // 清空选择
+      span.textContent = '';
+      label.textContent = '选择文件';
+    }
   } else {
     span.textContent = '';
     label.textContent = '选择文件';
+    lastFilePath = null;
   }
 }
 
@@ -301,19 +304,11 @@ function clearOutput(){ byId('output').value = ""; }
 
 function apiBase(){ return byId('baseUrl').value.replace(/\/+$/,''); }
 
-async function upload(){
-  const f = byId('fileInput').files[0];
-  if(!f){ alert("请选择文件"); return; }
-  const fd = new FormData(); fd.append('file', f);
-  const r = await fetch(apiBase()+"/upload", {method:'POST', body:fd});
-  const j = await r.json();
-  if(r.ok){ lastFileId = j.file_id; byId('fileIdSpan').textContent = "已上传: " + j.file_id; log("上传完成: " + JSON.stringify(j)); }
-  else { log("上传失败: " + JSON.stringify(j)); }
-}
+// upload() 函数已被移除，现在直接使用文件路径
 
 async function probe(){
-  if(!lastFileId){ alert("请先上传文件"); return; }
-  const r = await fetch(apiBase()+"/ffprobe?file_id="+encodeURIComponent(lastFileId));
+  if(!lastFilePath){ alert("请选择文件"); return; }
+  const r = await fetch(apiBase()+"/ffprobe?file_path="+encodeURIComponent(lastFilePath));
   const j = await r.json();
   log("=== 视频探测信息 ===\n"+JSON.stringify(j,null,2));
 }
@@ -333,9 +328,9 @@ function gatherParams(){
 }
 
 async function estimate(){
-  if(!lastFileId){ alert("请先上传文件"); return; }
+  if(!lastFilePath){ alert("请选择文件"); return; }
   const fd = new FormData();
-  fd.append("file_id", lastFileId);
+  fd.append("file_path", lastFilePath);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   const r = await fetch(apiBase()+"/estimate", {method:'POST', body:fd});
@@ -353,9 +348,9 @@ async function estimate(){
 }
 
 async function runLocal(){
-  if(!lastFileId){ alert("请先上传文件"); return; }
+  if(!lastFilePath){ alert("请选择文件"); return; }
   const fd = new FormData();
-  fd.append("file_id", lastFileId);
+  fd.append("file_path", lastFilePath);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);
@@ -408,9 +403,9 @@ async function runLocal(){
 }
 
 async function runRemote(){
-  if(!lastFileId){ alert("请先上传文件"); return; }
+  if(!lastFilePath){ alert("请选择文件"); return; }
   const fd = new FormData();
-  fd.append("file_id", lastFileId);
+  fd.append("file_path", lastFilePath);
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);
