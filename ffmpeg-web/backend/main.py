@@ -153,6 +153,14 @@ OPS = [
     "10) Screen/Device Capture (note)",
 ]
 
+def escape_for_ffmpeg_subtitles_win(subs_path: str) -> str:
+    # 统一为正斜杠
+    p = subs_path.replace('\\', '/')
+    # 仅当是盘符路径时，对盘符冒号做反斜杠转义：C:/ → C\:/
+    if len(p) >= 2 and p[1] == ':':
+        p = p[0] + r'\:' + p[2:]
+    return p
+
 def build_pipeline_args(op: str, P: Dict[str, str]):
     vf, vcodec, aargs = [], [], []
     crf = P.get("crf") or "23"
@@ -206,7 +214,15 @@ def build_pipeline_args(op: str, P: Dict[str, str]):
     elif op == "6) Soft Subtitles (mov_text)":
         vcodec = ["-c:v","copy","-c:a","copy","-c:s","mov_text"]
     elif op == "6) Hard Subtitles (burn-in)":
-        if subs_path: vf.append(f"subtitles={shlex.quote(subs_path)}")
+        if subs_path:
+            # 处理Windows路径：反斜杠转正斜杠，并用单引号包围
+            import os
+            if os.name == 'nt':  # Windows系统
+                # 将反斜杠转换为正斜杠，并用单引号包围
+                escaped_subs_path = escape_for_ffmpeg_subtitles_win(subs_path)
+                vf.append(f"subtitles='{escaped_subs_path}':charenc=UTF-8")
+            else:
+                vf.append(f"subtitles='{subs_path}':charenc=UTF-8")
         vcodec = ["-c:v","libx264","-crf",crf,"-preset",preset]; aargs=["-c:a","aac","-b:a","128k"]
     elif op == "7) Thumbnail Grid (fps=1, 5x4)":
         vf.append("fps=1,scale=320:-1,tile=5x4")
@@ -482,6 +498,8 @@ def api_run_local(
         return JSONResponse(status_code=400, content={"error":"RTMP URL required."})
 
     out_path = choose_output_path(path, operation)
+    # 确保输出目录存在
+    pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     if operation == "9) HLS VOD Segments":
         folder = pathlib.Path(out_path).with_suffix("")
         folder.mkdir(parents=True, exist_ok=True)
@@ -544,6 +562,8 @@ def api_run_local_stream(
         return JSONResponse(status_code=400, content={"error":"RTMP URL required."})
 
     out_path = choose_output_path(path, operation)
+    # 确保输出目录存在
+    pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     if operation == "9) HLS VOD Segments":
         folder = pathlib.Path(out_path).with_suffix("")
         folder.mkdir(parents=True, exist_ok=True)
