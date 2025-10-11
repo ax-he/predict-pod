@@ -16,6 +16,13 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# 远程服务器配置
+REMOTE_HOST = "192.168.1.13"
+REMOTE_USER = "root"  # 根据实际情况修改用户名
+REMOTE_PORT = 22
+REMOTE_UPLOAD_DIR = "~/"  # 远程服务器上的上传目录
+REMOTE_OUTPUT_DIR = "~/"  # 远程服务器上的输出目录
+
 SAFETY_DEFAULT = 1.25
 SAMPLE_SECS_DEFAULT = 10
 MID_SAMPLE = True
@@ -100,6 +107,81 @@ def pretty_time(t_seconds: float) -> str:
 
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def execute_remote_command(host: str, port: int, username: str, command: str) -> tuple[bool, str]:
+    """
+    在远程服务器上执行命令（使用ssh）
+    返回: (success, output)
+    """
+    try:
+        # 构建ssh命令
+        ssh_cmd = ["ssh", "-p", str(port), f"{username}@{host}", command]
+
+        # 执行命令
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟超时
+        )
+
+        if result.returncode == 0:
+            return True, result.stdout
+        else:
+            return False, result.stderr
+
+    except subprocess.TimeoutExpired:
+        return False, "命令执行超时"
+    except Exception as e:
+        return False, str(e)
+
+def scp_upload(host: str, port: int, username: str, local_path: str, remote_path: str) -> bool:
+    """
+    上传文件到远程服务器（使用scp）
+    """
+    try:
+        # 构建scp命令
+        scp_cmd = ["scp", "-P", str(port), local_path, f"{username}@{host}:{remote_path}"]
+
+        # 执行上传
+        result = subprocess.run(
+            scp_cmd,
+            capture_output=True,
+            timeout=60  # 1分钟超时
+        )
+
+        return result.returncode == 0
+
+    except subprocess.TimeoutExpired:
+        print("SCP upload timeout")
+        return False
+    except Exception as e:
+        print(f"SCP upload failed: {e}")
+        return False
+
+def scp_download(host: str, port: int, username: str, remote_path: str, local_path: str) -> bool:
+    """
+    从远程服务器下载文件（使用scp）
+    """
+    try:
+        # 构建scp命令
+        scp_cmd = ["scp", "-P", str(port), f"{username}@{host}:{remote_path}", local_path]
+
+        # 执行下载
+        result = subprocess.run(
+            scp_cmd,
+            capture_output=True,
+            timeout=60  # 1分钟超时
+        )
+
+        return result.returncode == 0
+
+    except subprocess.TimeoutExpired:
+        print("SCP download timeout")
+        return False
+    except Exception as e:
+        print(f"SCP download failed: {e}")
+        return False
 
 # ---------------- Core: ffprobe / ops ----------------
 def ffprobe_info(path: str) -> Dict[str, Any]:
@@ -651,38 +733,84 @@ def api_run_local_stream(
     # 用 StreamingResponse 持续推送文本
     return StreamingResponse(line_stream(), media_type="text/plain; charset=utf-8")
 
-@app.post("/run_remote_stub")
-def api_run_remote_stub(
+@app.post("/run_remote")
+def api_run_remote(
     file_id: str = Form(...),
     operation: str = Form(...),
     params_json: str = Form(...),
     last_eta_seconds: float = Form(0.0)
 ):
+    """
+    真正的远程执行：上传文件到远程服务器，执行FFmpeg命令，然后下载结果
+    """
     P = json.loads(params_json)
-    remote_input = "/path/on/remote/input.mp4"
-    remote_output = "/path/on/remote/output.mp4"
+
+    # 获取本地文件路径
+    local_input_path = str(UPLOAD_DIR / file_id)
+
+    # 生成远程文件名
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    remote_input_name = f"{ts}_{file_id}"
+    remote_output_name = f"{ts}_{pathlib.Path(file_id).stem}_out_{ts}.mp4"
+
+    remote_input_path = f"{REMOTE_UPLOAD_DIR}/{remote_input_name}"
+    remote_output_path = f"{REMOTE_OUTPUT_DIR}/{remote_output_name}"
+
+    # 构建远程执行命令
     try:
-        preview_cmd = build_real_run_cmd(remote_input, remote_output, operation, P)
+        # 为远程执行准备参数，更新文件路径
+        remote_P = P.copy()
+        remote_P = {k: v for k, v in remote_P.items() if v}  # 移除空值
+
+        # 更新字幕文件路径（如果有）
+        if operation == "6) Soft Subtitles (mov_text)" and P.get("subs"):
+            remote_subs_path = f"{REMOTE_UPLOAD_DIR}/{ts}_{pathlib.Path(P['subs']).name}"
+            remote_P["subs"] = remote_subs_path
+
+        remote_cmd = build_real_run_cmd(remote_input_path, remote_output_path, operation, remote_P)
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-    plan = {
-        "upload": [
-            "scp <LOCAL_INPUT> REMOTE:REMOTE_DIR/input.mp4",
-        ],
-        "run": "ssh REMOTE 'cd REMOTE_DIR && " + " ".join(shlex.quote(str(x)) for x in preview_cmd) + "'",
-        "download": "scp REMOTE:REMOTE_DIR/output.* <LOCAL_DIR>/"
-    }
-    if operation == "4) Overlay Watermark (PNG at 10,10)" and P.get("overlay"):
-        plan["upload"].append("scp <overlay.png> REMOTE:REMOTE_DIR/overlay.png")
-    if operation.startswith("6)") and P.get("subs"):
-        plan["upload"].append("scp <subs.srt> REMOTE:REMOTE_DIR/subs.srt")
+    # 执行远程操作
+    try:
+        # 步骤1: 上传输入文件
+        if not scp_upload(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, local_input_path, remote_input_path):
+            return JSONResponse(status_code=500, content={"error": "文件上传失败"})
 
-    ref = None
-    if last_eta_seconds and last_eta_seconds > 0:
-        ref = {"eta_seconds": last_eta_seconds, "eta_hms": pretty_time(last_eta_seconds)}
+        # 步骤2: 上传字幕文件（如果需要）
+        if operation == "6) Soft Subtitles (mov_text)" and P.get("subs"):
+            # 对于软字幕，需要上传字幕文件到远程服务器
+            subs_file_name = pathlib.Path(P["subs"]).name
+            remote_subs_path = f"{REMOTE_UPLOAD_DIR}/{ts}_{subs_file_name}"
+            if not scp_upload(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, P["subs"], remote_subs_path):
+                return JSONResponse(status_code=500, content={"error": "字幕文件上传失败"})
 
-    return {"plan": plan, "reference_eta": ref, "note": "Fill REMOTE / REMOTE_DIR later."}
+        # 步骤3: 在远程服务器上执行FFmpeg命令
+        # 确保远程输出目录存在
+        mkdir_cmd = f"mkdir -p {REMOTE_OUTPUT_DIR}"
+        execute_remote_command(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, mkdir_cmd)
+
+        ssh_cmd = f"cd {REMOTE_UPLOAD_DIR} && {' '.join(shlex.quote(str(x)) for x in remote_cmd)}"
+        success, output = execute_remote_command(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, ssh_cmd)
+
+        if not success:
+            return JSONResponse(status_code=500, content={"error": f"远程执行失败: {output}"})
+
+        # 步骤4: 下载结果文件
+        local_output_path = str(OUTPUT_DIR / remote_output_name)
+        if not scp_download(REMOTE_HOST, REMOTE_PORT, REMOTE_USER, remote_output_path, local_output_path):
+            return JSONResponse(status_code=500, content={"error": "结果文件下载失败"})
+
+        return {
+            "success": True,
+            "message": "远程执行完成",
+            "output_path": remote_output_name,
+            "remote_output": remote_output_path,
+            "local_output": local_output_path
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"远程执行出错: {str(e)}"})
 
 @app.post("/clear_uploads")
 def clear_uploads():

@@ -509,18 +509,19 @@ async function runRemote(){
   fd.append("operation", byId('operation').value);
   fd.append("params_json", JSON.stringify(gatherParams()));
   fd.append("last_eta_seconds", lastETASeconds);
-  const r = await fetch(apiBase()+"/run_remote_stub", {method:'POST', body:fd});
+
+  log("=== 上传并远程运行 ===");
+  log("操作类型: " + OP_LABELS[byId('operation').value]);
+
+  const r = await fetch(apiBase()+"/run_remote", {method:'POST', body:fd});
   const j = await r.json();
   if(r.ok){
-    log("=== 上传并远程运行 (存根) ===");
-    log("操作类型: " + OP_LABELS[byId('operation').value]);
-    log("上传:\n  "+j.plan.upload.join("\n  "));
-    log("运行:\n  "+j.plan.run);
-    log("下载:\n  "+j.plan.download);
-    if(j.reference_eta) log("参考预估时间: "+j.reference_eta.eta_hms);
-    log(j.note);
+    log("远程执行完成");
+    log("输出文件: " + j.output_path);
+    log("本地路径: " + j.local_output);
+    log("执行耗时: " + j.elapsed_hms);
   }else{
-    log("远程计划错误: "+JSON.stringify(j));
+    log("远程执行失败: " + (j.error || JSON.stringify(j)));
   }
 }
 
