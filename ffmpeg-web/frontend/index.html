@@ -37,15 +37,20 @@
   label {
     display: inline-block;
     width: 15%;
-    min-width: 150px;
+    min-width: 120px;
     vertical-align: top;
     font-size: calc(12px + 0.4vh);
   }
   input[type="text"], input[type="number"] {
-    width: 25%;
-    min-width: 200px;
+    width: 20%;
+    min-width: 180px;
     height: calc(20px + 1vh);
     font-size: calc(12px + 0.4vh);
+    margin-right: 2vw;
+  }
+  input#time_threshold {
+    width: 15%;
+    min-width: 120px;
   }
   .file-offscreen {
     position: absolute;
@@ -150,6 +155,19 @@
     background: #dd1111;
   }
 
+  .btn.primary {
+    background: #007bff;                /* 蓝色背景表示主要操作 */
+    border-color: #0056b3;
+  }
+
+  .btn.primary:hover {
+    background: #0056b3;
+  }
+
+  .btn.primary:active {
+    background: #004085;
+  }
+
   /* 禁用态（如需） */
   .btn[disabled],
   label.btn[aria-disabled="true"] {
@@ -179,6 +197,8 @@
 <div class="row">
   <label>后端地址：</label>
   <input id="baseUrl" type="text" value="http://localhost:8000" />
+  <label>时间阈值（秒）：</label>
+  <input id="time_threshold" type="number" value="300" placeholder="超过此时间将远程执行" />
 </div>
 
 <fieldset>
@@ -243,13 +263,9 @@
 </fieldset>
 
 <div class="row">
-  <button class="btn" onclick="probe()">(1) 探测 (ffprobe)</button>
-  <button class="btn" onclick="estimate()">(2) 采样与预估</button>
-  <button class="btn" onclick="runLocal()">(3) 本地运行</button>
-  <button class="btn" onclick="runRemote()">(4) 上传并远程运行</button>
-  <button class="btn" onclick="clearOutput()">(5) 清空输出</button>
-  <!-- <button class="btn danger" onclick="clearUploads()">(6) 清空上传</button> -->
-  <button class="btn" onclick="clearUploads()">(6) 清空上传</button>
+  <button class="btn" onclick="autoExecute()">一键执行</button>
+  <button class="btn" onclick="clearOutput()">清空输出</button>
+  <button class="btn" onclick="clearUploads()">清空上传</button>
 </div>
 
 <fieldset id="output-fieldset">
@@ -403,6 +419,10 @@ function gatherParams(){
   };
 }
 
+function getTimeThreshold(){
+  return parseInt(byId('time_threshold').value) || 300;
+}
+
 async function estimate(){
   if(!lastFileId){ alert("请先上传文件"); return; }
   const fd = new FormData();
@@ -501,6 +521,39 @@ async function runRemote(){
     log(j.note);
   }else{
     log("远程计划错误: "+JSON.stringify(j));
+  }
+}
+
+async function autoExecute(){
+  if(!lastFileId){ alert("请先上传文件"); return; }
+
+  const threshold = getTimeThreshold();
+
+  // 先执行预估
+  log("=== 一键执行：开始预估 ===");
+  try {
+    await estimate();
+  } catch (error) {
+    log("预估失败，无法继续一键执行: " + error.message);
+    return;
+  }
+
+  // 获取预估时间
+  const etaSeconds = lastETASeconds;
+  if (!etaSeconds || etaSeconds <= 0) {
+    log("无法获取有效的预估时间");
+    return;
+  }
+
+  log(`预估时间: ${pretty_time(etaSeconds)} (${etaSeconds.toFixed(1)} 秒)`);
+  log(`时间阈值: ${pretty_time(threshold)} (${threshold} 秒)`);
+
+  if (etaSeconds <= threshold) {
+    log(`预估时间(${pretty_time(etaSeconds)})在阈值内，执行本地运行`);
+    await runLocal();
+  } else {
+    log(`预估时间(${pretty_time(etaSeconds)})超出阈值，执行远程运行`);
+    await runRemote();
   }
 }
 </script>
