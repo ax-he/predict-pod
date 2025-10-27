@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-q2o_predictor_enhanced.py — Scoring-based CJK-safe TaskTypeDetector + local DeepSeek tokenizer
+q2o_predictor_enhanced.py — fixed TaskTypeDetector (CJK-safe) + local DeepSeek tokenizer
 """
 
 import os
@@ -21,7 +21,7 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("q2o")
 
-# -------- optional deps --------
+# ------- optional deps -------
 try:
     import tiktoken
     _HAS_TIKTOKEN = True
@@ -125,7 +125,7 @@ class TokenCounter:
         self.use_chat_template = use_chat_template
         self.errors: List[str] = []
 
-        # A) 本地目录/文件优先（仅本地，不联网）
+        # A) 优先：本地目录/文件
         if prefer_hf_model:
             p = Path(prefer_hf_model)
             if p.is_file():
@@ -139,7 +139,7 @@ class TokenCounter:
                 except Exception as e:
                     logger.warning(f"本地目录加载失败，继续候选：{e}")
 
-        # B) 远程候选（兜底，需要网络）
+        # B) 远程候选（需要网络；兜底）
         if _HAS_HF and self.hf_tok is None:
             for name in self._get_tokenizer_candidates():
                 try:
@@ -200,7 +200,7 @@ class TokenCounter:
             try:
                 if self.use_chat_template:
                     messages = [{"role": "user", "content": text}]
-                    # 只统计输入侧（不在尾部加 assistant 起始提示）
+                    # 只统计输入侧（不补 assistant 起始提示）
                     prompt = self.hf_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
                     tokens = self.hf_tok(prompt, add_special_tokens=False).input_ids
                 else:
@@ -230,90 +230,83 @@ class TokenCounter:
 
 
 # --------------------------
-# 3) TaskTypeDetector — scoring + conflict resolution (CJK-safe)
+# 3) TaskTypeDetector (CJK-safe)
 # --------------------------
 class TaskTypeDetector:
     def __init__(self):
-        # 优先级用于同分时的决策：解释 > 代码 > 总结 > 翻译 > 数学 > 创作 > 短问
-        self.priority = ["qa_explain", "code", "summarize", "translate", "math", "creative", "qa_short"]
+        self.type_rules = [
+            ("code", self._is_code_question),
+            ("math", self._is_math_question),
+            ("translate", self._is_translate_question),
+            ("summarize", self._is_summarize_question),
+            ("qa_explain", self._is_explanation_question),
+            ("creative", self._is_creative_question),
+            ("qa_short", self._is_short_question),  # 放最后
+        ]
 
-        # 预编译常用正则（中文不加 \b；英文用 ASCII 边界）
-        self.rx = {
-            "ascii_word_python": re.compile(r"(?<![A-Za-z0-9_])(python|java|cpp|c\+\+|c#|rust|go|javascript|typescript|js|ts|html|css|sql|pytorch|torch|numpy|pandas|regex|shell|bash|docker|kubernetes|git)(?![A-Za-z0-9_])", re.I),
-            "code_shape": re.compile(r"(def |class |import |return |function )", re.I),
-            "code_zh": re.compile(r"(代码|编程|实现|函数|方法|算法|调试|报错|异常|栈跟踪|堆栈|脚本|接口|库|框架|类|对象|模块|依赖|缓存|链表|哈希|字典|映射|递归|并发|多线程|协程|LRU|LRU缓存)"),
-            "math_strong": re.compile(r"(导数|积分|微分|方程|概率分布|矩阵|向量|期望|方差|证明|公式|泰勒|傅里叶|拉普拉斯|最大似然|贝叶斯|极限|梯度|范数|内积|外积)"),
-            "math_formula": re.compile(r"(\d+\s*[\+\-\*/]\s*\d+|\d+\s*\^\s*\d+|[≈≃≅≡≠≤≥∞∑∏√∫∂∆π]|\\frac|\\sum|\\int|\\alpha|\\beta|\\gamma)"),
-            "math_weak": re.compile(r"(计算|概率|统计|期望|方差)"),
-            "explain": re.compile(r"(为什么|为何|如何|怎么|原理|机制|原因|解释|区别|不同|对比|比较|difference|compare|contrast|explain|why|how)", re.I),
-            "summarize": re.compile(r"(总结|概括|摘要|概要|简述|tl;dr|tldr|summarize|summary|主要观点|核心内容|大意)", re.I),
-            "translate": re.compile(r"(翻译|译为|译成|翻译成|translate|translation)", re.I),
-            "creative": re.compile(r"(写一篇|创作|故事|小说|诗歌|文章|essay|article|story|poem|想象|假如|如果|假设|开头|结尾|情节|角色)", re.I),
-        }
+    # --- helpers ---
+    @staticmethod
+    def _ascii_word(pat_word: str) -> str:
+        """用 ASCII 单词边界包裹拉丁词，避免匹配到 cpython 等"""
+        return rf"(?<![A-Za-z0-9_]){pat_word}(?![A-Za-z0-9_])"
 
     @staticmethod
     def _approx_units(raw: str) -> int:
+        """估算长度：CJK 字符数 + 拉丁词数（中文不按空格切）"""
         latin_words = re.findall(r"[A-Za-z0-9_]+", raw or "")
         cjk_chars = re.findall(r"[\u4e00-\u9fff]", raw or "")
         return len(latin_words) + len(cjk_chars)
 
+    # --- detectors ---
+    def _is_explanation_question(self, ql: str, raw: str) -> bool:
+        return bool(re.search(r"(为什么|为何|怎么|如何|原理|机制|原因|explain|why|how|difference|对比|比较|区别|详细解释|深入分析)", ql, re.I))
+
+    def _is_code_question(self, ql: str, raw: str) -> bool:
+        # 中文关键词：不加 \b
+        zh = r"(代码|编程|实现|函数|方法|算法|调试|报错|异常|栈跟踪|堆栈|脚本|接口|库|框架|类|对象|模块|依赖|缓存|链表|哈希|字典|映射|递归|并发|多线程|协程|LRU|LRU缓存)"
+        # 拉丁关键词：用 ASCII 边界
+        latin = self._ascii_word(r"(python|java|cpp|c\+\+|c#|rust|go|javascript|typescript|js|ts|html|css|sql|pytorch|torch|numpy|pandas|regex|shell|bash|docker|kubernetes|git)")
+        code_shape = r"(def |class |import |return |function )"
+        pats = [zh, latin, code_shape]
+        return any(re.search(p, ql, re.I) for p in pats)
+
+    def _is_math_question(self, ql: str, raw: str) -> bool:
+        zh = r"(计算|数学|公式|方程|函数|导数|积分|概率|统计|几何|代数|极限|矩阵|向量|期望|方差)"
+        latin = self._ascii_word(r"(integral|derivative|equation|probability|matrix|vector|expectation|variance)")
+        expr = r"(\d+\s*[\+\-\*/]\s*\d+|\d+\s*\^\s*\d+|\d+\s*[×÷])"
+        pats = [zh, latin, expr]
+        return any(re.search(p, ql, re.I) for p in pats)
+
+    def _is_translate_question(self, ql: str, raw: str) -> bool:
+        # 需要出现“翻译/译为/译成/translate/translation”等动词/名词
+        return bool(re.search(r"(翻译|译为|译成|翻译成|translate|translation)", ql, re.I))
+
+    def _is_summarize_question(self, ql: str, raw: str) -> bool:
+        return bool(re.search(r"(总结|概括|摘要|概要|简述|tl;dr|tldr|summarize|summary|主要观点|核心内容|大意)", ql, re.I))
+
+    def _is_creative_question(self, ql: str, raw: str) -> bool:
+        return bool(re.search(r"(写一篇|创作|故事|小说|诗歌|文章|essay|article|story|poem|想象|假如|如果|假设|开头|结尾|情节|角色)", ql, re.I))
+
+    def _is_short_question(self, ql: str, raw: str) -> bool:
+        # 用估算长度而不是 split()（中文无空格）
+        units = self._approx_units(raw)
+        return units <= 8
+
     def detect(self, question: str) -> str:
         if not question:
             return "qa_short"
-        q = question or ""
-
-        scores = {
-            "code": 0.0, "math": 0.0, "translate": 0.0, "summarize": 0.0,
-            "qa_explain": 0.0, "creative": 0.0, "qa_short": 0.0
-        }
-
-        # —— 加分：代码 —— #
-        if self.rx["ascii_word_python"].search(q):
-            scores["code"] += 2.5
-        if self.rx["code_shape"].search(q):
-            scores["code"] += 2.0
-        if self.rx["code_zh"].search(q):
-            scores["code"] += 2.0
-
-        # —— 加分：数学 —— #
-        if self.rx["math_strong"].search(q):
-            scores["math"] += 3.0
-        if self.rx["math_formula"].search(q):
-            scores["math"] += 3.0
-        # “计算/概率/统计”等弱特征只给低分，避免单词误触发
-        if self.rx["math_weak"].search(q):
-            scores["math"] += 0.8
-
-        # —— 加分：解释/总结/翻译/创作 —— #
-        if self.rx["explain"].search(q):
-            scores["qa_explain"] += 3.2
-        if self.rx["summarize"].search(q):
-            scores["summarize"] += 2.5
-        if self.rx["translate"].search(q):
-            scores["translate"] += 2.5
-        if self.rx["creative"].search(q):
-            scores["creative"] += 2.0
-
-        # —— 短问题降权 —— #
-        units = self._approx_units(q)
+        q = (question or "").lower().strip()
+        for t, fn in self.type_rules:
+            if fn(q, question):
+                return t
+        # fallback：再按估算长度粗分
+        units = self._approx_units(question)
         if units <= 8:
-            scores["qa_short"] += 1.0
-
-        # —— 冲突消解 —— #
-        # 若出现解释型词而数学仅由弱特征触发（没有强公式/强数学词），则解释优先、数学减半
-        has_explain = scores["qa_explain"] > 0
-        has_math_strong = bool(self.rx["math_strong"].search(q) or self.rx["math_formula"].search(q))
-        if has_explain and not has_math_strong and scores["math"] > 0:
-            scores["math"] *= 0.5
-            scores["qa_explain"] += 0.8  # 轻微加权，让解释更占优
-
-        # 同理：解释 vs 代码（例如“请解释这段 Python 代码”）
-        if has_explain and scores["code"] > 0:
-            scores["qa_explain"] += 0.4
-
-        # —— 选最大分；同分用优先级 —— #
-        best = max(scores.items(), key=lambda kv: (kv[1], -self.priority.index(kv[0])))
-        return best[0]
+            return "qa_short"
+        elif units <= 30:
+            return "qa_explain"
+        else:
+            return "creative"
 
 
 # --------------------------
@@ -480,9 +473,9 @@ class Q2OPredictor:
 def estimate_from_question(question: str, history_csv: Optional[str] = None,
                            prefer_hf_model: Optional[str] = None, use_chat_template: bool = False,
                            respect_len_hint: bool = True) -> Dict[str, object]:
-    predictor = Q2OPredictor(history_csv=history_csv, prefer_hf_model=prefer_hf_model,
-                             use_chat_template=use_chat_template, respect_len_hint=respect_len_hint)
-    return predictor.predict_single(question).__dict__
+        predictor = Q2OPredictor(history_csv=history_csv, prefer_hf_model=prefer_hf_model,
+                                 use_chat_template=use_chat_template, respect_len_hint=respect_len_hint)
+        return predictor.predict_single(question).__dict__
 
 
 def main():
