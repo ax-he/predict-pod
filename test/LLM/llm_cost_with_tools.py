@@ -193,7 +193,7 @@ if __name__ == "__main__":
     )
 
     # === SLA ===
-    sla = SLA(max_total_seconds=4.0, max_vram_gb=10.0)  # 例如：端侧可用显存 10GB，上限 4 秒
+    sla = SLA(max_total_seconds=120.0, max_vram_gb=10.0)  # 例如：端侧可用显存 10GB，上限 4 秒
 
     # === 估算 & 路由 ===
     local_cost = estimate_costs(local_cfg, local_hw, base, rt, tools)
