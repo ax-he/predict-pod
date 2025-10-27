@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-q2o_predictor_enhanced.py
-
-目标：输入自然语言“问题” -> 自动估算输入 token S、问题类型、输出 token O 的 p50/p90
-本版特性：
-- 优先从“本地目录/文件”加载 DeepSeek 分词器（只需 tokenizer.json / tokenizer_config.json）
-- 失败时再回退到 tiktoken(cl100k_base)、gpt2、字符近似
-- chat 模板计数只统计输入侧（不把生成提示算进 S）
-- 增强长度提示解析、任务类型识别、回归预测（可选）
-- 批量模式、缓存、置信度输出、详细日志
-
-用法示例见文件末尾的“测试样例”。
+q2o_predictor_enhanced.py — Scoring-based CJK-safe TaskTypeDetector + local DeepSeek tokenizer
 """
 
 import os
@@ -28,11 +18,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# 日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("q2o")
 
-# 依赖探测
+# -------- optional deps --------
 try:
     import tiktoken
     _HAS_TIKTOKEN = True
@@ -57,7 +46,7 @@ except Exception:
 
 
 # --------------------------
-# 数据类
+# dataclass
 # --------------------------
 @dataclass
 class PredictionResult:
@@ -73,15 +62,11 @@ class PredictionResult:
 
 
 # --------------------------
-# 1) 长度提示解析
+# 1) Length hint
 # --------------------------
 class LengthHintParser:
     @staticmethod
     def parse_len_hint(question: str) -> Optional[Tuple[int, str]]:
-        """
-        返回 (估算的tokens, 匹配单位说明)
-        注意：英文 word≈0.75 token（经验值），中文“字≈1 token”
-        """
         if not question:
             return None
         ql = question.lower()
@@ -100,10 +85,9 @@ class LengthHintParser:
             (r"(\d+)\s*paragraphs?", "paragraphs", 100.0),
             (r"(\d+)\s*lines?", "lines", 20.0),
             (r"(\d+)\s*pages?", "pages", 500.0),
-            # 范围
+            # 范围与模糊
             (r"(\d+)\s*到\s*(\d+)\s*字", "字范围", 1.0),
             (r"(\d+)\s*-\s*(\d+)\s*words?", "word范围", 0.75),
-            # 模糊词
             (r"(?:约|大概|大约|左右)\s*(\d+)\s*字", "约字", 1.0),
             (r"(?:about|approximately|around)\s*(\d+)\s*words?", "约words", 0.75),
         ]
@@ -126,28 +110,22 @@ class LengthHintParser:
 
     @staticmethod
     def has_length_constraint(question: str) -> bool:
-        return bool(re.search(r"(字|词|句|段|行|页|words?|sentences?|paragraphs?|lines?|pages?|约|大概|左右|about|approximately|around)", 
+        return bool(re.search(r"(字|词|句|段|行|页|words?|sentences?|paragraphs?|lines?|pages?|约|大概|左右|about|approximately|around)",
                               question or "", flags=re.I))
 
 
 # --------------------------
-# 2) 估算输入 token S
+# 2) TokenCounter
 # --------------------------
 class TokenCounter:
     def __init__(self, prefer_hf_model: Optional[str] = None, use_chat_template: bool = False):
-        """
-        prefer_hf_model: 本地目录/文件 或 远程repo名。
-            - 若传的是文件路径，会自动取其上级目录
-            - 若是目录，优先用 AutoTokenizer.from_pretrained(dir, local_files_only=True)
-        use_chat_template: True 时用 chat 模板格式化，但只统计输入侧（不补 generation prompt）
-        """
         self.enc = None
         self.hf_tok = None
         self.model_name = None
         self.use_chat_template = use_chat_template
         self.errors: List[str] = []
 
-        # A) 优先本地目录/文件
+        # A) 本地目录/文件优先（仅本地，不联网）
         if prefer_hf_model:
             p = Path(prefer_hf_model)
             if p.is_file():
@@ -155,15 +133,13 @@ class TokenCounter:
             if p.is_dir() and _HAS_HF:
                 try:
                     logger.info(f"从本地目录加载 tokenizer: {p}")
-                    self.hf_tok = AutoTokenizer.from_pretrained(
-                        str(p), use_fast=True, local_files_only=True
-                    )
+                    self.hf_tok = AutoTokenizer.from_pretrained(str(p), use_fast=True, local_files_only=True)
                     self.model_name = str(p.resolve())
                     return
                 except Exception as e:
-                    logger.warning(f"本地目录加载失败，将继续尝试其他候选：{e}")
+                    logger.warning(f"本地目录加载失败，继续候选：{e}")
 
-        # B) 再尝试若干远程候选（需要网络）
+        # B) 远程候选（兜底，需要网络）
         if _HAS_HF and self.hf_tok is None:
             for name in self._get_tokenizer_candidates():
                 try:
@@ -196,18 +172,16 @@ class TokenCounter:
                 self.errors.append(f"gpt2 失败: {e}")
 
         if self.hf_tok is None and self.enc is None:
-            logger.warning("所有 tokenizer 都失败，使用字符近似法")
+            logger.warning("所有 tokenizer 都失败，将使用字符近似法")
 
     def _get_tokenizer_candidates(self) -> List[str]:
-        # 环境变量
         cands: List[str] = []
         for env in ["Q2O_TOKENIZER", "HF_TOKENIZER", "TOKENIZER_NAME"]:
             v = os.getenv(env)
             if v:
                 cands.append(v)
-        # DeepSeek / 其他常见仓库
         cands.extend([
-            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",  # 正确的 7B 蒸馏仓库
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
             "deepseek-ai/DeepSeek-R1",
             "deepseek-ai/DeepSeek-V2-7B",
             "deepseek-ai/DeepSeek-V2",
@@ -222,15 +196,12 @@ class TokenCounter:
         text = text.strip()
         errors = []
 
-        # HF tokenizer
         if self.hf_tok is not None:
             try:
                 if self.use_chat_template:
                     messages = [{"role": "user", "content": text}]
-                    # 只统计输入侧（不补 generation prompt）
-                    prompt = self.hf_tok.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=False
-                    )
+                    # 只统计输入侧（不在尾部加 assistant 起始提示）
+                    prompt = self.hf_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
                     tokens = self.hf_tok(prompt, add_special_tokens=False).input_ids
                 else:
                     tokens = self.hf_tok.encode(text, add_special_tokens=False)
@@ -241,9 +212,8 @@ class TokenCounter:
                     tokens = self.hf_tok.encode(text, add_special_tokens=False)
                     return len(tokens)
                 except Exception as e2:
-                    errors.append(f"HF 纯文本回退也失败：{e2}")
+                    errors.append(f"HF 纯文本回退失败：{e2}")
 
-        # tiktoken
         if self.enc is not None:
             try:
                 return len(self.enc.encode(text))
@@ -253,7 +223,6 @@ class TokenCounter:
         if errors:
             logger.warning("Tokenizer errors: " + "; ".join(errors))
 
-        # 字符近似
         char_count = len(text)
         token_estimate = max(1, int(math.ceil(char_count / 3.5)))
         logger.info(f"字符近似法: {char_count} chars -> ~{token_estimate} tokens")
@@ -261,91 +230,94 @@ class TokenCounter:
 
 
 # --------------------------
-# 3) 任务类型识别（规则）
+# 3) TaskTypeDetector — scoring + conflict resolution (CJK-safe)
 # --------------------------
 class TaskTypeDetector:
     def __init__(self):
-        self.type_rules = [
-            ("code", self._is_code_question),
-            ("math", self._is_math_question),
-            ("translate", self._is_translate_question),
-            ("summarize", self._is_summarize_question),
-            ("qa_explain", self._is_explanation_question),
-            ("creative", self._is_creative_question),
-            ("qa_short", self._is_short_question),
-        ]
+        # 优先级用于同分时的决策：解释 > 代码 > 总结 > 翻译 > 数学 > 创作 > 短问
+        self.priority = ["qa_explain", "code", "summarize", "translate", "math", "creative", "qa_short"]
+
+        # 预编译常用正则（中文不加 \b；英文用 ASCII 边界）
+        self.rx = {
+            "ascii_word_python": re.compile(r"(?<![A-Za-z0-9_])(python|java|cpp|c\+\+|c#|rust|go|javascript|typescript|js|ts|html|css|sql|pytorch|torch|numpy|pandas|regex|shell|bash|docker|kubernetes|git)(?![A-Za-z0-9_])", re.I),
+            "code_shape": re.compile(r"(def |class |import |return |function )", re.I),
+            "code_zh": re.compile(r"(代码|编程|实现|函数|方法|算法|调试|报错|异常|栈跟踪|堆栈|脚本|接口|库|框架|类|对象|模块|依赖|缓存|链表|哈希|字典|映射|递归|并发|多线程|协程|LRU|LRU缓存)"),
+            "math_strong": re.compile(r"(导数|积分|微分|方程|概率分布|矩阵|向量|期望|方差|证明|公式|泰勒|傅里叶|拉普拉斯|最大似然|贝叶斯|极限|梯度|范数|内积|外积)"),
+            "math_formula": re.compile(r"(\d+\s*[\+\-\*/]\s*\d+|\d+\s*\^\s*\d+|[≈≃≅≡≠≤≥∞∑∏√∫∂∆π]|\\frac|\\sum|\\int|\\alpha|\\beta|\\gamma)"),
+            "math_weak": re.compile(r"(计算|概率|统计|期望|方差)"),
+            "explain": re.compile(r"(为什么|为何|如何|怎么|原理|机制|原因|解释|区别|不同|对比|比较|difference|compare|contrast|explain|why|how)", re.I),
+            "summarize": re.compile(r"(总结|概括|摘要|概要|简述|tl;dr|tldr|summarize|summary|主要观点|核心内容|大意)", re.I),
+            "translate": re.compile(r"(翻译|译为|译成|翻译成|translate|translation)", re.I),
+            "creative": re.compile(r"(写一篇|创作|故事|小说|诗歌|文章|essay|article|story|poem|想象|假如|如果|假设|开头|结尾|情节|角色)", re.I),
+        }
+
+    @staticmethod
+    def _approx_units(raw: str) -> int:
+        latin_words = re.findall(r"[A-Za-z0-9_]+", raw or "")
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", raw or "")
+        return len(latin_words) + len(cjk_chars)
 
     def detect(self, question: str) -> str:
         if not question:
             return "qa_short"
-        q = (question or "").lower().strip()
-        for t, fn in self.type_rules:
-            if fn(q, question):
-                return t
-        # 兜底
-        wc = len(q.split())
-        if wc <= 5:
-            return "qa_short"
-        elif wc <= 15:
-            return "qa_explain"
-        else:
-            return "creative"
+        q = question or ""
 
-    def _is_code_question(self, ql: str, raw: str) -> bool:
-        pats = [
-            r"\b(code|程序|编程|实现|函数|算法|bug|错误|调试|python|java|cpp|c\+\+|javascript|js|html|css)\b",
-            r"\b(写代码|代码实现|程序实现|debug|报错|异常|stack trace)\b",
-            r"\b(def |function |class |import |print |return )\b",
-        ]
-        return any(re.search(p, ql, re.I) for p in pats)
+        scores = {
+            "code": 0.0, "math": 0.0, "translate": 0.0, "summarize": 0.0,
+            "qa_explain": 0.0, "creative": 0.0, "qa_short": 0.0
+        }
 
-    def _is_math_question(self, ql: str, raw: str) -> bool:
-        pats = [
-            r"\b(计算|数学|公式|方程|函数|导数|积分|概率|统计|几何|代数)\b",
-            r"\b(calculate|compute|solve|equation|formula|derivative|integral|probability)\b",
-            r"\b(\d+\s*[\+\-\*/]\s*\d+|\d+\s*\^\s*\d+|\d+\s*[×÷])\b",
-        ]
-        return any(re.search(p, ql, re.I) for p in pats)
+        # —— 加分：代码 —— #
+        if self.rx["ascii_word_python"].search(q):
+            scores["code"] += 2.5
+        if self.rx["code_shape"].search(q):
+            scores["code"] += 2.0
+        if self.rx["code_zh"].search(q):
+            scores["code"] += 2.0
 
-    def _is_translate_question(self, ql: str, raw: str) -> bool:
-        # 要求出现“翻译/译为/译成/translate/translation”等动词/名词（仅出现“中文/英文”不算）
-        core = re.search(r"(翻译|译为|译成|translate|translation)", ql, re.I)
-        struct = re.search(r"(把|将).{0,30}?(译为|译成|翻译成)", ql, re.I)
-        pat_en = re.search(r"(how to say|what is).{0,40} in (english|chinese|japanese)", ql, re.I)
-        return bool(core or struct or pat_en)
+        # —— 加分：数学 —— #
+        if self.rx["math_strong"].search(q):
+            scores["math"] += 3.0
+        if self.rx["math_formula"].search(q):
+            scores["math"] += 3.0
+        # “计算/概率/统计”等弱特征只给低分，避免单词误触发
+        if self.rx["math_weak"].search(q):
+            scores["math"] += 0.8
 
-    def _is_summarize_question(self, ql: str, raw: str) -> bool:
-        pats = [
-            r"\b(总结|概括|摘要|概要|简述|tl;dr|tldr|summarize|summary)\b",
-            r"\b(主要观点|核心内容|大意是什么)\b",
-            r"\b(in summary|to sum up|in conclusion)\b",
-        ]
-        return any(re.search(p, ql, re.I) for p in pats)
+        # —— 加分：解释/总结/翻译/创作 —— #
+        if self.rx["explain"].search(q):
+            scores["qa_explain"] += 3.2
+        if self.rx["summarize"].search(q):
+            scores["summarize"] += 2.5
+        if self.rx["translate"].search(q):
+            scores["translate"] += 2.5
+        if self.rx["creative"].search(q):
+            scores["creative"] += 2.0
 
-    def _is_explanation_question(self, ql: str, raw: str) -> bool:
-        pats = [
-            r"\b(为什么|为何|怎么|如何|原理|机制|原因|explain|why|how|what is the reason)\b",
-            r"\b(区别|不同|对比|比较|difference between|compare|contrast)\b",
-            r"\b(详细说明|详细解释|深入分析|elaborate|describe in detail)\b",
-        ]
-        return any(re.search(p, ql, re.I) for p in pats)
+        # —— 短问题降权 —— #
+        units = self._approx_units(q)
+        if units <= 8:
+            scores["qa_short"] += 1.0
 
-    def _is_creative_question(self, ql: str, raw: str) -> bool:
-        pats = [
-            r"\b(写一篇|创作|故事|小说|诗歌|文章|essay|article|story|poem)\b",
-            r"\b(想象|假如|如果|假设|imagine|suppose|what if)\b",
-            r"\b(开头|结尾|情节|角色|character|plot|scene)\b",
-        ]
-        return any(re.search(p, ql, re.I) for p in pats)
+        # —— 冲突消解 —— #
+        # 若出现解释型词而数学仅由弱特征触发（没有强公式/强数学词），则解释优先、数学减半
+        has_explain = scores["qa_explain"] > 0
+        has_math_strong = bool(self.rx["math_strong"].search(q) or self.rx["math_formula"].search(q))
+        if has_explain and not has_math_strong and scores["math"] > 0:
+            scores["math"] *= 0.5
+            scores["qa_explain"] += 0.8  # 轻微加权，让解释更占优
 
-    def _is_short_question(self, ql: str, raw: str) -> bool:
-        wc = len(raw.split())
-        return wc <= 8 and not any([self._is_explanation_question(ql, raw),
-                                    self._is_creative_question(ql, raw)])
+        # 同理：解释 vs 代码（例如“请解释这段 Python 代码”）
+        if has_explain and scores["code"] > 0:
+            scores["qa_explain"] += 0.4
+
+        # —— 选最大分；同分用优先级 —— #
+        best = max(scores.items(), key=lambda kv: (kv[1], -self.priority.index(kv[0])))
+        return best[0]
 
 
 # --------------------------
-# 4) 输出长度预测
+# 4) Length predictor
 # --------------------------
 class LengthPredictor:
     def __init__(self, csv_path: Optional[str] = None, tasks_for_prior: Optional[Dict[str, Dict[str, float]]] = None):
@@ -359,11 +331,9 @@ class LengthPredictor:
         if csv_path and os.path.exists(csv_path) and _HAS_SK:
             try:
                 df = pd.read_csv(csv_path)
-                # 列校验 & 类型转换
                 required = {"S", "O"}
-                missing = required - set(df.columns)
-                if missing:
-                    raise ValueError(f"历史CSV缺少列: {missing}，至少需要 {required}")
+                if not required.issubset(df.columns):
+                    raise ValueError(f"历史CSV缺少列，至少需要 {required}")
                 df = df.copy()
                 for c in ["S", "O"]:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -371,7 +341,6 @@ class LengthPredictor:
                     df["task"] = "qa_short"
                 df["task"] = df["task"].fillna("qa_short").astype(str)
                 df = df[["S", "O", "task"]].dropna()
-
                 if len(df) > 10:
                     self._fit_models(df)
                     self.has_model = True
@@ -396,7 +365,6 @@ class LengthPredictor:
         S = df["S"].to_numpy().reshape(-1, 1)
         logS = np.log1p(df["S"].to_numpy()).reshape(-1, 1)
         task = df["task"].fillna("qa_short").to_numpy().reshape(-1, 1)
-        # 兼容不同 sklearn 版本
         try:
             self.ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
         except TypeError:
@@ -449,7 +417,6 @@ class LengthPredictor:
             o_p90 = pri["p90_a"] * S + pri["p90_b"]
             o_mean = 0.5 * (o_p50 + o_p90)
 
-        # 裁剪
         o_mean = float(np.clip(o_mean, 1, 32768))
         o_p50  = float(np.clip(o_p50,  1, 32768))
         o_p90  = float(np.clip(o_p90,  1, 32768))
@@ -457,7 +424,7 @@ class LengthPredictor:
 
 
 # --------------------------
-# 5) 组合：文本 -> (S, task, O_hat)
+# 5) Glue
 # --------------------------
 class Q2OPredictor:
     def __init__(self, history_csv: Optional[str] = None, prefer_hf_model: Optional[str] = None,
@@ -510,9 +477,6 @@ class Q2OPredictor:
         self.predict_single.cache_clear()
 
 
-# --------------------------
-# 6) 便捷函数与 CLI
-# --------------------------
 def estimate_from_question(question: str, history_csv: Optional[str] = None,
                            prefer_hf_model: Optional[str] = None, use_chat_template: bool = False,
                            respect_len_hint: bool = True) -> Dict[str, object]:
@@ -522,7 +486,7 @@ def estimate_from_question(question: str, history_csv: Optional[str] = None,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="输入->S/O估算器（DeepSeek本地分词器优先）")
+    ap = argparse.ArgumentParser(description="输入->S/O估算器（CJK-safe 任务识别 + 本地分词器优先）")
     ap.add_argument("--q", type=str, help="输入的问题文本（单条模式）")
     ap.add_argument("--hist", type=str, default="", help="可选：历史CSV(列: S,O,task)")
     ap.add_argument("--tok", type=str, default="", help="分词器本地目录/文件 或 远程repo名（推荐本地目录）")
@@ -538,7 +502,6 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # 批量
     if args.batch and args.input_file:
         try:
             with open(args.input_file, "r", encoding="utf-8") as f:
@@ -560,7 +523,6 @@ def main():
             logger.error(f"批量失败：{e}")
         return
 
-    # 单条
     if not args.q:
         ap.error("单条模式必须提供 --q，或使用 --batch --input_file")
 
