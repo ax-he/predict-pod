@@ -4,7 +4,7 @@ import argparse, json, sys
 from typing import TypedDict, Optional
 from openai import OpenAI
 
-API_KEY   = "***"  # ← 换成你的
+API_KEY   = "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"  # ← 换成你的
 BASE_URL  = "https://openrouter.ai/api/v1"
 DEF_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
@@ -165,7 +165,7 @@ def route_and_answer(client: OpenAI, model: str, question: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-q","--question", type=str, default="把大象放进冰箱需要几步")
+    ap.add_argument("-q","--question", type=str, default="帮我把以下英文翻译成中文“The DeepSeek R1 model has undergone a minor version upgrade, with the current version being DeepSeek-R1-0528. In the latest update, DeepSeek R1 has significantly improved its depth of reasoning and inference capabilities by leveraging increased computational resources and introducing algorithmic optimization mechanisms during post-training. The model has demonstrated outstanding performance across various benchmark evaluations, including mathematics, programming, and general logic. Its overall performance is now approaching that of leading models, such as O3 and Gemini 2.5 Pro.”")
     ap.add_argument("-m","--model", type=str, default=DEF_MODEL)
     args = ap.parse_args()
 
