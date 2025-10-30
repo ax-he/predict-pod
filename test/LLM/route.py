@@ -5,7 +5,7 @@ from typing import TypedDict, Optional
 from openai import OpenAI
 from time import perf_counter  # ← 新增：高精度计时
 
-API_KEY   = "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"  # ← 换成你的
+API_KEY   = "***"  # ← 换成你的
 BASE_URL  = "https://openrouter.ai/api/v1"
 DEF_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
