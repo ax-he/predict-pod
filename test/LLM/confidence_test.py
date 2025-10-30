@@ -9,7 +9,7 @@ BASE_URL  = "https://openrouter.ai/api/v1"
 DEF_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
 # 可选：提供更强的备用模型用于法律/逐字引用（留空则直接置信度不足）
-FALLBACK_MODEL = ""  # 例如: "perplexity/sonar-reasoning" 或你信任的更强模型
+FALLBACK_MODEL = "tngtech/deepseek-r1t-chimera:free"
 
 TASK_ENUM = [
     "arithmetic", "format_conversion", "programming", "math_proof",
