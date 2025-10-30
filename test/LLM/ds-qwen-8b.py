@@ -2,7 +2,7 @@ import requests
 import json
 
 # 直接把你的 Key 写在这里（注意不要把此文件提交到公共仓库）
-API_KEY = "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"
+API_KEY = "***"
 
 response = requests.post(
   url="https://openrouter.ai/api/v1/chat/completions",

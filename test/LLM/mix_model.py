@@ -5,7 +5,7 @@ import asyncio
 from time import perf_counter
 from openai import AsyncOpenAI
 
-API_KEY = "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"  # 放你的 Key
+API_KEY = "***"  # 放你的 Key
 BASE_URL = "https://openrouter.ai/api/v1"
 
 MODELS = [
