@@ -4,7 +4,7 @@ import argparse, json, sys
 from typing import TypedDict, Optional
 from openai import OpenAI
 
-API_KEY   = "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"  # ← 换成你的
+API_KEY   = "***"  # ← 换成你的
 BASE_URL  = "https://openrouter.ai/api/v1"
 DEF_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
