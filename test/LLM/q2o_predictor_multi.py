@@ -3,10 +3,13 @@
 q2o_predictor_multi.py
 目标：同一问题在多个模型上同时估算：
     - 输入 token 数 S（基于各自 tokenizer）
-    - 任务类型（改进规则，优先解释型）
-    - 输出 token 的 O_mean / O_p50 / O_p90（结合先验 + 可选生成上限约束）
+    - 任务类型（解释优先）
+    - 输出 token 的 O_mean / O_p50 / O_p90（结合先验 + 可选生成上限剪裁）
 
-用法示例见文件底部。
+本版改动要点：
+1) 仅从 {cfg_dir}/config.json 读取可用的生成上限字段（max_new_tokens / max_length）。
+2) 不再调用 GenerationConfig.from_pretrained()，避免默认 20 token 截断。
+3) 若 config.json 未显式提供上述字段，则不做任何上限剪裁。
 """
 
 import os
@@ -27,26 +30,24 @@ logging.basicConfig(
 )
 log = logging.getLogger("q2o")
 
-# ---------- 可选依赖 ----------
+# ---------- 可选依赖（只用于 tokenizer 计数；不加载模型权重） ----------
 try:
     from transformers import (
         AutoTokenizer,
         PreTrainedTokenizerFast,
-        GenerationConfig,
-        PretrainedConfig
     )
     _HAS_HF = True
 except Exception as e:
     _HAS_HF = False
-    log.warning("transformers 未安装或导入失败，仅能使用字符近似计数: %s", e)
+    log.warning("transformers 未安装或导入失败，将退化为字符近似计数: %s", e)
 
 
 # ---------- 数据类 ----------
 @dataclass
 class ModelBundle:
     alias: str
-    tok_dir: str                 # 包含 tokenizer.json / tokenizer_config.json
-    cfg_dir: Optional[str] = None  # 包含 generation_config.json 或 config.json
+    tok_dir: str                 # 包含 tokenizer.json / tokenizer_config.json 的目录
+    cfg_dir: Optional[str] = None  # 包含 config.json 的目录（可与 tok_dir 相同或不同）
     params_b: Optional[float] = None  # 可选：参数规模（B），用于轻度调节啰嗦度
 
 
@@ -76,10 +77,14 @@ class LengthHint:
             (r"(\d+)\s*字", 1.0),
             (r"(\d+)\s*词", 1.0),
             (r"(\d+)\s*words?", 1.0),
-            (r"(\d+)\s*句|sentences?", 15.0),
-            (r"(\d+)\s*段|paragraphs?", 100.0),
-            (r"(\d+)\s*行|lines?", 20.0),
-            (r"(\d+)\s*页|pages?", 500.0),
+            (r"(?:^|[^a-z])(\\d+)\s*sentences?(?:$|[^a-z])", 15.0),
+            (r"(\d+)\s*句", 15.0),
+            (r"(?:^|[^a-z])(\d+)\s*paragraphs?(?:$|[^a-z])", 100.0),
+            (r"(\d+)\s*段", 100.0),
+            (r"(?:^|[^a-z])(\d+)\s*lines?(?:$|[^a-z])", 20.0),
+            (r"(\d+)\s*行", 20.0),
+            (r"(?:^|[^a-z])(\d+)\s*pages?(?:$|[^a-z])", 500.0),
+            (r"(\d+)\s*页", 500.0),
             (r"(?:约|大概|左右)\s*(\d+)\s*字", 1.0),
             (r"(?:about|approximately|around)\s*(\d+)\s*words?", 1.0),
         ]
@@ -132,7 +137,7 @@ class TaskDetector:
 
         # 明确解释类：遇到 why/how/原理/为什么/如何 等 => 直接判为解释
         if re.search(r"(why|how|explain|原理|机制|原因|为什么|为何|如何|解释|讲解)", t):
-            # 若包含强数学公式痕迹再让位（如含显著算式）
+            # 若包含强数学公式痕迹再让位（如显著算式）
             if re.search(r"\d+\s*[\+\-\*/]\s*\d+|\d+\s*\^\s*\d+|[\=\≈~]\s*\d+", t):
                 return "math"
             return "qa_explain"
@@ -184,7 +189,7 @@ class TokenCounter:
             except Exception as e:
                 log.warning("通过 tokenizer.json 加载失败：%s", e)
 
-        # 次选：AutoTokenizer.from_pretrained(tok_dir)
+        # 次选：AutoTokenizer.from_pretrained(tok_dir)（完全离线，读取本地文件）
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(tok_dir, use_fast=True, trust_remote_code=True)
             self.name = tok_dir
@@ -211,53 +216,45 @@ class TokenCounter:
         return max(1, int(math.ceil(len(text) / 3.5)))
 
 
-# ---------- 4) 生成配置读取 & 输出长度剪裁 ----------
+# ---------- 4) 仅读取 config.json 的上限 ----------
 class GenConfigReader:
-    def __init__(self, cfg_dir: Optional[str], fallback_dir: str):
-        """
-        cfg_dir: 建议指向含 generation_config.json 或 config.json 的目录
-        fallback_dir: 若 cfg_dir 为空，尝试在 tokenizer 目录查找（以便简化部署）
-        """
-        self.cfg_dir = cfg_dir or fallback_dir
+    """
+    仅从 cfg_dir/config.json 读取生成相关上限（若存在）：
+      - max_new_tokens：直接作为“新增 token 上限”
+      - max_length：总长度上限（输入+输出），此处仅做保守剪裁（不估算输入 S 与其之和）
+
+    若文件不存在或未包含上述字段：不做任何上限剪裁。
+    注意：像 max_position_embeddings / max_seq_len 代表上下文窗口，不等价于生成上限，此处忽略。
+    """
+    def __init__(self, cfg_dir: Optional[str]):
+        self.cfg_dir = cfg_dir
         self.max_new_tokens = None
         self.max_length = None
-        self.temperature = None
-        self.top_p = None
-        self.top_k = None
 
-        if not _HAS_HF:
+        if not cfg_dir:
+            return
+
+        cfg_path = os.path.join(cfg_dir, "config.json")
+        if not os.path.isfile(cfg_path):
             return
 
         try:
-            # 优先：GenerationConfig（会在目录里找 generation_config.json；若无则回退到 model config）
-            gen = GenerationConfig.from_pretrained(self.cfg_dir)
-            # 取常见字段
-            self.max_new_tokens = getattr(gen, "max_new_tokens", None)
-            self.max_length = getattr(gen, "max_length", None)
-            self.temperature = getattr(gen, "temperature", None)
-            self.top_p = getattr(gen, "top_p", None)
-            self.top_k = getattr(gen, "top_k", None)
-        except Exception:
-            # 直接读 config.json
-            try:
-                conf = PretrainedConfig.from_pretrained(self.cfg_dir)
-                # 某些仓库会把生成参数也写在 config.json 中
-                self.max_new_tokens = getattr(conf, "max_new_tokens", None)
-                self.max_length = getattr(conf, "max_length", None)
-                self.temperature = getattr(conf, "temperature", None)
-                self.top_p = getattr(conf, "top_p", None)
-                self.top_k = getattr(conf, "top_k", None)
-            except Exception as e2:
-                log.info("未发现有效的生成配置（可忽略）：%s", e2)
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            # 仅读取显式提供的生成上限
+            if isinstance(cfg.get("max_new_tokens"), int):
+                self.max_new_tokens = int(cfg["max_new_tokens"])
+            if isinstance(cfg.get("max_length"), int):
+                self.max_length = int(cfg["max_length"])
+        except Exception as e:
+            log.info("读取 config.json 失败（忽略上限）：%s", e)
 
     def apply_caps(self, o_val: float) -> float:
-        """若存在上限（max_new_tokens / max_length），对输出 token 进行剪裁"""
         cap = None
-        if isinstance(self.max_new_tokens, (int, float)):
-            cap = int(self.max_new_tokens)
-        elif isinstance(self.max_length, (int, float)):
-            # 注意：max_length 常用于“输入+输出”的总长度；这里只做保守处理
-            cap = int(self.max_length)
+        if isinstance(self.max_new_tokens, int):
+            cap = self.max_new_tokens
+        elif isinstance(self.max_length, int):
+            cap = self.max_length
         if cap:
             return float(max(1, min(int(round(o_val)), cap)))
         return float(max(1, int(round(o_val))))
@@ -269,7 +266,7 @@ class LengthPredictor:
         self.params_b = params_b
         self.gen_reader = gen_reader
 
-        # 经验先验（按任务类型），可根据你真实日志再标定
+        # 经验先验（按任务类型），可根据真实日志再标定
         self.priors = {
             "translate": {"p50_a": 1.00, "p50_b": 0,  "p90_a": 1.20, "p90_b": 10},
             "summarize": {"p50_a": 0.30, "p50_b": 30, "p90_a": 0.45, "p90_b": 50},
@@ -284,7 +281,6 @@ class LengthPredictor:
         """根据模型规模做一个*很轻*的啰嗦度调整（可按需替换/关闭）"""
         if not self.params_b or self.params_b <= 0:
             return 1.0
-        # 以 8B 为基准，>8B 时略增，<8B 略减，限制在 [0.85, 1.30]
         import math as _m
         f = 1.0 + 0.12 * _m.log10(max(1e-9, self.params_b / 8.0))
         return float(min(1.30, max(0.85, f)))
@@ -311,7 +307,7 @@ class LengthPredictor:
             o_p90 = float(int(round(len_hint_tokens * 1.2)))
             o_mean = 0.5 * (o_p50 + o_p90)
 
-        # 生成上限剪裁（来自 generation_config.json 或 config.json）
+        # 仅基于 config.json 的上限剪裁（如果明确提供）
         if self.gen_reader:
             o_p50 = self.gen_reader.apply_caps(o_p50)
             o_p90 = self.gen_reader.apply_caps(o_p90)
@@ -335,8 +331,8 @@ def run_for_bundle(question: str, mb: ModelBundle) -> Prediction:
     hint = LengthHint.parse(question)
     conf = 0.8 if hint else (0.7 if LengthHint.has_constraint(question) else 0.6)
 
-    # 生成配置读取（用于上限剪裁）
-    gen_reader = GenConfigReader(cfg_dir=mb.cfg_dir, fallback_dir=mb.tok_dir)
+    # 只读 config.json（若存在），不调用 GenerationConfig
+    gen_reader = GenConfigReader(cfg_dir=mb.cfg_dir)
 
     # 输出长度预测
     lp = LengthPredictor(params_b=mb.params_b, gen_reader=gen_reader)
@@ -360,7 +356,7 @@ def parse_bundles(args) -> List[ModelBundle]:
     两种指定方式：
     A) 旧式单模型（兼容）：
        --tok /path/to/tokenizer  [--cfg /path/to/config] [--params_b 8]
-    B) 多模型：
+    B) 多模型（推荐）：
        多次传入 --bundle，格式：
        alias:/path/to/tokenizer[:/path/to/config][:paramsB]
        例如：
@@ -392,12 +388,12 @@ def parse_bundles(args) -> List[ModelBundle]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="多模型 S/O token 估算器")
+    ap = argparse.ArgumentParser(description="多模型 S/O token 估算器（仅读 config.json 上限）")
     ap.add_argument("--q", type=str, required=True, help="输入的问题文本")
 
     # 单模型（兼容）
     ap.add_argument("--tok", type=str, help="单模型：tokenizer 目录")
-    ap.add_argument("--cfg", type=str, help="单模型：config 目录（含 generation_config.json 或 config.json）")
+    ap.add_argument("--cfg", type=str, help="单模型：config 目录（包含 config.json）")
     ap.add_argument("--params_b", type=float, help="单模型：参数规模（B），影响啰嗦度微调")
 
     # 多模型（推荐）
