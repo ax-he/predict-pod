@@ -1,0 +1,3 @@
+export OPENROUTER_API_KEY="***"
+
+python3 estimate_route.py   --q "问题内容"   --bundle qwen8b:/home/haga/models/deepseek-r1-qwen-8b/tokenizer:/home/haga/models/deepseek-r1-qwen-8b/config:8:0.5   --bundle chimera671b:/home/haga/models/deepseek-r1t-chimera-671b/tokenizer:/home/haga/models/deepseek-r1t-chimera-671b/config:671:2.0   --model_small "deepseek/deepseek-r1-0528-qwen3-8b:free"   --model_large "tngtech/deepseek-r1t-chimera:free"   --large_ngpus 16  --show_json
