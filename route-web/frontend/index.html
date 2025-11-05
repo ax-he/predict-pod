@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>Cost Estimate + Router (WS)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1020; --card:#11182a; --muted:#7e8aa6; --fg:#e8eefc; --accent:#6ea8ff; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:var(--bg); color:var(--fg);}
+    .wrap { max-width:1200px; margin:0 auto; padding:20px; }
+    h1 { font-size:20px; margin:0 0 16px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    .card { background:var(--card); border:1px solid #1c253b; border-radius:12px; padding:16px; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+    input, textarea { width:100%; background:#0f1526; color:var(--fg); border:1px solid #223055; border-radius:10px; padding:10px; outline:none; }
+    textarea { min-height:90px; resize:vertical; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .row3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; }
+    .btn { background:var(--accent); border:none; color:#041029; padding:10px 16px; border-radius:10px; cursor:pointer; font-weight:600;}
+    .cols { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space:pre-wrap; word-break:break-word; }
+    .small { color:var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>推理任务开销预测 & 智能路由</h1>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>OpenRouter API Key</label>
+          <input id="apiKey" type="password" placeholder="sk-or-..." />
+          <!-- <input id="apiKey" value="***"> -->
+        </div>
+        <div>
+          <label>问题 / Question</label>
+          <input id="question" type="text" placeholder="输入你的问题" />
+          <!-- <input id="question" value="把大象放进冰箱要几步"> -->
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>小模型 (remote model)</label>
+          <input id="s_remote" value="deepseek/deepseek-r1-0528-qwen3-8b:free" />
+        </div>
+        <div>
+          <label>大模型 (remote model)</label>
+          <input id="l_remote" value="tngtech/deepseek-r1t-chimera:free" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>小模型 tokenizer 目录 (含 tokenizer.json)</label>
+          <input id="s_tok" value="C:\Users\10760\Downloads\models\deepseek-r1-qwen-8b\tokenizer" />
+        </div>
+        <div>
+          <label>大模型 tokenizer 目录 (含 tokenizer.json)</label>
+          <input id="l_tok" value="C:\Users\10760\Downloads\models\deepseek-r1t-chimera-671b\tokenizer" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>小模型 config 目录 (含 config.json)</label>
+          <input id="s_cfg" value="C:\Users\10760\Downloads\models\deepseek-r1-qwen-8b\config" />
+        </div>
+        <div>
+          <label>大模型 config 目录 (含 config.json)</label>
+          <input id="l_cfg" value="C:\Users\10760\Downloads\models\deepseek-r1t-chimera-671b\config" />
+        </div>
+      </div>
+
+      <div class="row3">
+        <div>
+          <label>小模型参数规模 (B)</label>
+          <input id="s_pb" type="number" step="0.1" value="8" />
+        </div>
+        <div>
+          <label>大模型参数规模 (B)</label>
+          <input id="l_pb" type="number" step="1" value="671" />
+        </div>
+        <div>
+          <label>权重精度字节 (小/大, BF16=2, INT4=0.5)</label>
+          <input id="wb_pair" value="2.0,2.0" />
+        </div>
+      </div>
+
+      <div class="row3">
+        <div>
+          <label>小模型硬件 (名称)</label>
+          <input id="s_hwname" value="RTX 3060 12GB" />
+        </div>
+        <div>
+          <label>大模型硬件 (名称)</label>
+          <input id="l_hwname" value="A100 80GB" />
+        </div>
+        <div>
+          <label>大模型卡数 (线性放大估算)</label>
+          <input id="l_gpus" type="number" value="16" />
+        </div>
+      </div>
+
+      <div class="row3">
+        <div>
+          <label>小模型 FLOPs/s (FP16) 例: 12.7e12</label>
+          <input id="s_flops" value="12.7e12" />
+        </div>
+        <div>
+          <label>大模型 FLOPs/s (FP16) 单卡 例: 312e12</label>
+          <input id="l_flops" value="312e12" />
+        </div>
+        <div>
+          <label>小模型 HBM 带宽 Bytes/s 例: 360e9</label>
+          <input id="s_bw" value="360e9" />
+        </div>
+      </div>
+
+      <div class="row3">
+        <div>
+          <label>大模型 HBM 带宽 Bytes/s 单卡 例: 2039e9</label>
+          <input id="l_bw" value="2039e9" />
+        </div>
+        <div>
+          <label>小模型显存 GB</label>
+          <input id="s_vram" value="12" />
+        </div>
+        <div>
+          <label>大模型显存 GB (单卡)</label>
+          <input id="l_vram" value="80" />
+        </div>
+      </div>
+
+      <div class="row3">
+        <div>
+          <label>KV 字节 (FP16/BF16=2, INT8=1, INT4=0.5)</label>
+          <input id="kv_bytes" value="2.0" />
+        </div>
+        <div>
+          <label>KV 碎片率</label>
+          <input id="kv_frag" value="0.05" />
+        </div>
+        <div>
+          <label>框架/工作区预留 GB</label>
+          <input id="extra_vram" value="1.0" />
+        </div>
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:8px;">
+        <button class="btn" id="runBtn">开始估算并回答</button>
+        <span class="small">确保后端运行在 ws://127.0.0.1:8000/ws</span>
+      </div>
+    </div>
+
+    <div class="cols" style="margin-top:16px;">
+      <div class="card">
+        <div class="small">Cost & Routing</div>
+        <div id="left" class="mono"></div>
+      </div>
+      <div class="card">
+        <div class="small">Answer</div>
+        <div id="right" class="mono"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const left  = $("left");
+    const right = $("right");
+
+    function append(el, text) {
+      el.textContent += text;
+    }
+    function line(el, text="") {
+      append(el, text + "\n");
+    }
+    function resetViews() {
+      left.textContent = "";
+      right.textContent = "";
+    }
+
+    $("runBtn").onclick = async () => {
+      resetViews();
+
+      const [wb_small, wb_large] = $("wb_pair").value.split(",").map(x => parseFloat(x.trim() || "2.0"));
+
+      // WebSocket
+      const ws = new WebSocket("ws://127.0.0.1:8000/ws");
+      ws.onopen = () => {
+        const msg = {
+          action: "estimate_and_answer",
+          api_key: $("apiKey").value.trim(),
+          api_base: "https://openrouter.ai/api/v1",
+          question: $("question").value.trim(),
+          
+          // 小模型参数
+          small_model: $("s_remote").value.trim(),
+          small_tok_dir: $("s_tok").value.trim(),
+          small_params_B: parseFloat($("s_pb").value),
+          small_weight_bytes: wb_small,
+          small_hw_name: $("s_hwname").value.trim(),
+          small_flops_fp16: eval($("s_flops").value),
+          small_hbm_bw_Bps: eval($("s_bw").value),
+          small_vram_gb: parseFloat($("s_vram").value),
+          small_gpus: 1,
+          
+          // 大模型参数
+          large_model: $("l_remote").value.trim(),
+          large_tok_dir: $("l_tok").value.trim(),
+          large_params_B: parseFloat($("l_pb").value),
+          large_weight_bytes: wb_large,
+          large_hw_name: $("l_hwname").value.trim(),
+          large_flops_fp16: eval($("l_flops").value),
+          large_hbm_bw_Bps: eval($("l_bw").value),
+          large_vram_gb: parseFloat($("l_vram").value),
+          large_gpus: parseInt($("l_gpus").value),
+          
+          // 运行时参数
+          kv_bytes: parseFloat($("kv_bytes").value),
+          kv_frag: parseFloat($("kv_frag").value),
+          extra_vram_overhead_gb: parseFloat($("extra_vram").value)
+        };
+        ws.send(JSON.stringify(msg));
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const obj = JSON.parse(ev.data);
+          if (obj.type === "log") {
+            // 左框输出：cost & routing 信息
+            append(left, obj.data);
+          } else if (obj.type === "answer_chunk") {
+            // 右框输出：回答片段
+            append(right, obj.data);
+          } else if (obj.type === "answer_done") {
+            // 回答完成
+            line(left, "\n[完成] 回答已生成");
+          } else if (obj.type === "status") {
+            line(left, `[status] ${obj.data}`);
+          } else if (obj.type === "error") {
+            line(left, `[error] ${obj.data}`);
+          }
+        } catch (e) {
+          line(left, `[parse-error] ${e}`);
+        }
+      };
+
+      ws.onerror = (e) => {
+        line(left, `[ws-error] ${e?.message || e}`);
+      };
+      ws.onclose = () => {
+        line(left, `WebSocket closed.`);
+      };
+    };
+  </script>
+</body>
+</html>
