@@ -24,6 +24,25 @@ try:
 except Exception:
     _HAS_HF = False
 
+# ========== 系统监控库 ==========
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except Exception:
+    _HAS_PSUTIL = False
+
+try:
+    import pynvml
+    _HAS_PYNVML = True
+except Exception:
+    _HAS_PYNVML = False
+
+try:
+    import wmi
+    _HAS_WMI = True
+except Exception:
+    _HAS_WMI = False
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -298,11 +317,173 @@ async def send_answer(ws: WebSocket, text: str):
         await asyncio.sleep(0)  # 让出事件循环
     await ws.send_json({"type":"answer_done"})
 
+# ===================== 系统资源监控 =====================
+def get_system_stats() -> Dict[str, Any]:
+    """获取系统资源使用情况（支持NVIDIA/AMD/Intel GPU）"""
+    stats = {
+        "cpu_percent": 0.0,
+        "disk_usage": 0.0,
+        "disk_read_mb": 0.0,
+        "disk_write_mb": 0.0,
+        "gpu_count": 0,
+        "gpus": []
+    }
+    
+    # CPU使用率
+    if _HAS_PSUTIL:
+        try:
+            stats["cpu_percent"] = psutil.cpu_percent(interval=0.1)
+        except Exception:
+            pass
+        
+        # 磁盘使用率（C盘）
+        try:
+            disk = psutil.disk_usage('C:\\')
+            stats["disk_usage"] = disk.percent
+        except Exception:
+            pass
+        
+        # 磁盘IO
+        try:
+            disk_io = psutil.disk_io_counters()
+            if disk_io:
+                stats["disk_read_mb"] = round(disk_io.read_bytes / (1024**2), 2)
+                stats["disk_write_mb"] = round(disk_io.write_bytes / (1024**2), 2)
+        except Exception:
+            pass
+    
+    # GPU信息 - 通用方案（通过WMI获取所有GPU）
+    gpu_list = []
+    nvidia_gpu_map = {}  # 存储NVIDIA GPU的详细信息
+    
+    # 第一步：通过WMI获取所有GPU的基本信息
+    if _HAS_WMI:
+        try:
+            w = wmi.WMI()
+            wmi_gpus = w.Win32_VideoController()
+            for idx, gpu in enumerate(wmi_gpus):
+                gpu_name = gpu.Name or "Unknown GPU"
+                adapter_ram = 0
+                try:
+                    if gpu.AdapterRAM:
+                        adapter_ram = int(gpu.AdapterRAM) / (1024**3)  # 转换为GB
+                except Exception:
+                    pass
+                
+                # 判断GPU厂商
+                vendor = "Unknown"
+                if "NVIDIA" in gpu_name.upper():
+                    vendor = "NVIDIA"
+                elif "AMD" in gpu_name.upper() or "RADEON" in gpu_name.upper():
+                    vendor = "AMD"
+                elif "INTEL" in gpu_name.upper():
+                    vendor = "Intel"
+                
+                gpu_info = {
+                    "id": idx,
+                    "name": gpu_name,
+                    "vendor": vendor,
+                    "mem_total_gb": round(adapter_ram, 2) if adapter_ram > 0 else None,
+                    "gpu_util": None,  # WMI不提供利用率
+                    "mem_util": None,
+                    "mem_used_gb": None,
+                    "mem_percent": None,
+                    "temperature": None,
+                    "driver_version": gpu.DriverVersion or None
+                }
+                gpu_list.append(gpu_info)
+        except Exception as e:
+            print(f"WMI GPU检测错误: {e}")
+    
+    # 第二步：对于NVIDIA GPU，使用pynvml获取详细信息
+    if _HAS_PYNVML:
+        try:
+            pynvml.nvmlInit()
+            device_count = pynvml.nvmlDeviceGetCount()
+            
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode('utf-8')
+                
+                # GPU利用率
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    gpu_util = util.gpu
+                    mem_util = util.memory
+                except Exception:
+                    gpu_util = None
+                    mem_util = None
+                
+                # 显存信息
+                try:
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    mem_used_gb = mem_info.used / (1024**3)
+                    mem_total_gb = mem_info.total / (1024**3)
+                    mem_percent = (mem_info.used / mem_info.total) * 100
+                except Exception:
+                    mem_used_gb = None
+                    mem_total_gb = None
+                    mem_percent = None
+                
+                # 温度
+                try:
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                except Exception:
+                    temp = None
+                
+                nvidia_gpu_map[name] = {
+                    "gpu_util": gpu_util,
+                    "mem_util": mem_util,
+                    "mem_used_gb": round(mem_used_gb, 2) if mem_used_gb else None,
+                    "mem_total_gb": round(mem_total_gb, 2) if mem_total_gb else None,
+                    "mem_percent": round(mem_percent, 1) if mem_percent else None,
+                    "temperature": temp
+                }
+        except Exception as e:
+            print(f"NVIDIA GPU监控错误: {e}")
+    
+    # 第三步：合并信息
+    for gpu in gpu_list:
+        if gpu["vendor"] == "NVIDIA" and gpu["name"] in nvidia_gpu_map:
+            # 用pynvml的详细信息更新
+            nvidia_data = nvidia_gpu_map[gpu["name"]]
+            gpu.update(nvidia_data)
+    
+    stats["gpu_count"] = len(gpu_list)
+    stats["gpus"] = gpu_list
+    
+    return stats
+
+async def system_monitor_task(websocket: WebSocket, stop_event: asyncio.Event):
+    """后台任务：定期发送系统资源信息"""
+    try:
+        while not stop_event.is_set():
+            stats = await asyncio.to_thread(get_system_stats)
+            try:
+                await websocket.send_json({"type": "system_stats", "data": stats})
+            except Exception:
+                break
+            # 每2秒更新一次
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+                break  # 如果stop_event被设置，退出循环
+            except asyncio.TimeoutError:
+                continue  # 超时继续下一次循环
+    except Exception as e:
+        print(f"系统监控任务错误: {e}")
+
 # ===================== WebSocket 主流程 =====================
 @app.websocket("/ws")
 async def ws_main(websocket: WebSocket):
     await websocket.accept()
     print("connection open")
+    
+    # 启动系统监控后台任务
+    stop_monitor = asyncio.Event()
+    monitor_task = asyncio.create_task(system_monitor_task(websocket, stop_monitor))
+    
     try:
         while True:
             raw = await websocket.receive_text()
@@ -452,6 +633,15 @@ async def ws_main(websocket: WebSocket):
             pass
         try:
             await websocket.close()
+        except Exception:
+            pass
+    finally:
+        # 停止系统监控任务
+        stop_monitor.set()
+        try:
+            await asyncio.wait_for(monitor_task, timeout=3.0)
+        except asyncio.TimeoutError:
+            monitor_task.cancel()
         except Exception:
             pass
 

@@ -30,13 +30,13 @@
       <div class="row">
         <div>
           <label>OpenRouter API Key</label>
-          <input id="apiKey" type="password" placeholder="sk-or-..." />
-          <!-- <input id="apiKey" value="***" /> -->
+          <!-- <input id="apiKey" type="password" placeholder="sk-or-..." /> -->
+          <input id="apiKey" value="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">
         </div>
         <div>
           <label>问题 / Question</label>
-          <input id="question" type="text" placeholder="输入你的问题" />
-          <!-- <input id="question" value="把大象放进冰箱要几步"> -->
+          <!-- <input id="question" type="text" placeholder="输入你的问题" /> -->
+          <input id="question" value="把大象放进冰箱要几步">
         </div>
       </div>
 
@@ -164,6 +164,29 @@
         <div id="right" class="mono"></div>
       </div>
     </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="small">系统资源监控 (实时)</div>
+      <div id="sysmon" style="margin-top:10px;">
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap:12px;">
+          <div>
+            <div style="color:var(--muted); font-size:11px;">CPU 使用率</div>
+            <div style="font-size:24px; font-weight:600; color:var(--accent);" id="cpu-val">--</div>
+            <div style="height:6px; background:#1c253b; border-radius:3px; margin-top:4px;">
+              <div id="cpu-bar" style="height:100%; background:var(--accent); border-radius:3px; width:0%; transition:width 0.5s;"></div>
+            </div>
+          </div>
+          <div>
+            <div style="color:var(--muted); font-size:11px;">磁盘 C: 使用率</div>
+            <div style="font-size:24px; font-weight:600; color:var(--accent);" id="disk-val">--</div>
+            <div style="height:6px; background:#1c253b; border-radius:3px; margin-top:4px;">
+              <div id="disk-bar" style="height:100%; background:var(--accent); border-radius:3px; width:0%; transition:width 0.5s;"></div>
+            </div>
+          </div>
+        </div>
+        <div id="gpu-info" style="margin-top:16px;"></div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -180,6 +203,118 @@
     function resetViews() {
       left.textContent = "";
       right.textContent = "";
+    }
+
+    // 更新系统监控信息
+    function updateSystemStats(stats) {
+      // 更新CPU
+      if (stats.cpu_percent !== undefined) {
+        $("cpu-val").textContent = stats.cpu_percent.toFixed(1) + "%";
+        $("cpu-bar").style.width = stats.cpu_percent + "%";
+      }
+      
+      // 更新磁盘
+      if (stats.disk_usage !== undefined) {
+        $("disk-val").textContent = stats.disk_usage.toFixed(1) + "%";
+        $("disk-bar").style.width = stats.disk_usage + "%";
+      }
+      
+      // 更新GPU信息（支持NVIDIA/AMD/Intel）
+      const gpuContainer = $("gpu-info");
+      if (stats.gpu_count > 0 && stats.gpus && stats.gpus.length > 0) {
+        let gpuHtml = '<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:12px; margin-top:8px;">';
+        stats.gpus.forEach(gpu => {
+          // 厂商标识颜色
+          const vendorColors = {
+            'NVIDIA': '#76b900',
+            'AMD': '#ed1c24',
+            'Intel': '#0071c5',
+            'Unknown': 'var(--muted)'
+          };
+          const vendorColor = vendorColors[gpu.vendor] || 'var(--muted)';
+          
+          gpuHtml += `
+            <div style="border:1px solid #1c253b; border-radius:8px; padding:12px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div style="color:var(--muted); font-size:11px;">GPU ${gpu.id}: ${gpu.name}</div>
+                <div style="background:${vendorColor}; color:#fff; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:600;">${gpu.vendor}</div>
+              </div>
+          `;
+          
+          // GPU利用率（如果有数据）
+          if (gpu.gpu_util !== null && gpu.gpu_util !== undefined) {
+            const utilColor = gpu.gpu_util > 80 ? '#ff6b6b' : (gpu.gpu_util > 50 ? '#ffa94d' : 'var(--accent)');
+            gpuHtml += `
+              <div style="margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+                  <span style="font-size:11px; color:var(--muted);">GPU利用率</span>
+                  <span style="font-size:14px; font-weight:600; color:${utilColor};">${gpu.gpu_util}%</span>
+                </div>
+                <div style="height:4px; background:#1c253b; border-radius:2px;">
+                  <div style="height:100%; background:${utilColor}; border-radius:2px; width:${gpu.gpu_util}%; transition:width 0.5s;"></div>
+                </div>
+              </div>
+            `;
+          } else {
+            gpuHtml += `
+              <div style="margin-bottom:8px;">
+                <span style="font-size:11px; color:var(--muted);">GPU利用率: </span>
+                <span style="font-size:12px; color:var(--muted);">不可用</span>
+              </div>
+            `;
+          }
+          
+          // 显存使用（如果有数据）
+          if (gpu.mem_used_gb !== null && gpu.mem_total_gb !== null && gpu.mem_percent !== null) {
+            gpuHtml += `
+              <div style="margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+                  <span style="font-size:11px; color:var(--muted);">显存使用</span>
+                  <span style="font-size:12px; color:var(--fg);">${gpu.mem_used_gb}GB / ${gpu.mem_total_gb}GB (${gpu.mem_percent}%)</span>
+                </div>
+                <div style="height:4px; background:#1c253b; border-radius:2px;">
+                  <div style="height:100%; background:var(--accent); border-radius:2px; width:${gpu.mem_percent}%; transition:width 0.5s;"></div>
+                </div>
+              </div>
+            `;
+          } else if (gpu.mem_total_gb !== null) {
+            gpuHtml += `
+              <div style="margin-bottom:8px;">
+                <span style="font-size:11px; color:var(--muted);">显存容量: </span>
+                <span style="font-size:12px; color:var(--fg);">${gpu.mem_total_gb}GB</span>
+              </div>
+            `;
+          }
+          
+          // 温度（如果有数据）
+          if (gpu.temperature !== null && gpu.temperature !== undefined) {
+            const tempColor = gpu.temperature > 80 ? '#ff6b6b' : (gpu.temperature > 70 ? '#ffa94d' : '#51cf66');
+            gpuHtml += `
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-size:11px; color:var(--muted);">温度</span>
+                <span style="font-size:14px; font-weight:600; color:${tempColor};">${gpu.temperature}°C</span>
+              </div>
+            `;
+          } else {
+            gpuHtml += `
+              <div style="font-size:11px; color:var(--muted);">温度: 不可用</div>
+            `;
+          }
+          
+          // 驱动版本（如果有）
+          if (gpu.driver_version) {
+            gpuHtml += `
+              <div style="margin-top:6px; font-size:10px; color:var(--muted);">驱动: ${gpu.driver_version}</div>
+            `;
+          }
+          
+          gpuHtml += `</div>`;
+        });
+        gpuHtml += '</div>';
+        gpuContainer.innerHTML = gpuHtml;
+      } else {
+        gpuContainer.innerHTML = '<div style="color:var(--muted); font-size:12px;">未检测到GPU</div>';
+      }
     }
 
     $("runBtn").onclick = async () => {
@@ -270,6 +405,9 @@
               thinkingTimer = null;
             }
             line(left, `[error] ${obj.data}`);
+          } else if (obj.type === "system_stats") {
+            // 更新系统监控信息
+            updateSystemStats(obj.data);
           }
         } catch (e) {
           line(left, `[parse-error] ${e}`);
