@@ -34,8 +34,10 @@ except Exception:
 try:
     import pynvml
     _HAS_PYNVML = True
+    _NVML_INIT_FAILED = False  # 标记NVML是否初始化失败
 except Exception:
     _HAS_PYNVML = False
+    _NVML_INIT_FAILED = False
 
 try:
     import wmi
@@ -396,7 +398,8 @@ def get_system_stats() -> Dict[str, Any]:
             print(f"WMI GPU检测错误: {e}")
     
     # 第二步：对于NVIDIA GPU，使用pynvml获取详细信息
-    if _HAS_PYNVML:
+    global _NVML_INIT_FAILED
+    if _HAS_PYNVML and not _NVML_INIT_FAILED:
         try:
             pynvml.nvmlInit()
             device_count = pynvml.nvmlDeviceGetCount()
@@ -442,7 +445,13 @@ def get_system_stats() -> Dict[str, Any]:
                     "temperature": temp
                 }
         except Exception as e:
-            print(f"NVIDIA GPU监控错误: {e}")
+            # 只在第一次失败时打印错误，并标记为失败
+            if not _NVML_INIT_FAILED:
+                _NVML_INIT_FAILED = True
+                # 只在检测到NVIDIA GPU但NVML不可用时才打印警告
+                if any(gpu["vendor"] == "NVIDIA" for gpu in gpu_list):
+                    print(f"警告: 检测到NVIDIA GPU，但NVML库初始化失败: {e}")
+                    print("提示: GPU利用率和温度监控将不可用，仅显示基本信息")
     
     # 第三步：合并信息
     for gpu in gpu_list:
