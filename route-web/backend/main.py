@@ -431,6 +431,8 @@ async def ws_main(websocket: WebSocket):
             try:
                 client = build_client(api_key, api_base)
                 await send_status(websocket, f"[answer] model={routed_model}")
+                # 通知前端开始显示"正在思考"
+                await websocket.send_json({"type":"thinking_start"})
                 text = await get_answer_text_async(client, routed_model, q)
                 if not text:
                     await send_error(websocket, "[answer] 空响应或解析失败")

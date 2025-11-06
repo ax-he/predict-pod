@@ -31,7 +31,7 @@
         <div>
           <label>OpenRouter API Key</label>
           <input id="apiKey" type="password" placeholder="sk-or-..." />
-          <!-- <input id="apiKey" value="***"> -->
+          <!-- <input id="apiKey" value="***" /> -->
         </div>
         <div>
           <label>问题 / Question</label>
@@ -187,6 +187,10 @@
 
       const [wb_small, wb_large] = $("wb_pair").value.split(",").map(x => parseFloat(x.trim() || "2.0"));
 
+      // 计时器相关变量
+      let thinkingTimer = null;
+      let thinkingStartTime = 0;
+
       // WebSocket
       const ws = new WebSocket("ws://127.0.0.1:8000/ws");
       ws.onopen = () => {
@@ -232,15 +236,39 @@
           if (obj.type === "log") {
             // 左框输出：cost & routing 信息
             append(left, obj.data);
+          } else if (obj.type === "thinking_start") {
+            // 开始思考，启动计时器
+            thinkingStartTime = Date.now();
+            right.textContent = "正在思考……0秒";
+            thinkingTimer = setInterval(() => {
+              const elapsed = Math.floor((Date.now() - thinkingStartTime) / 1000);
+              right.textContent = `正在思考……${elapsed}秒`;
+            }, 1000);
           } else if (obj.type === "answer_chunk") {
+            // 停止计时器，清空"正在思考"文本
+            if (thinkingTimer) {
+              clearInterval(thinkingTimer);
+              thinkingTimer = null;
+              right.textContent = "";
+            }
             // 右框输出：回答片段
             append(right, obj.data);
           } else if (obj.type === "answer_done") {
+            // 停止计时器
+            if (thinkingTimer) {
+              clearInterval(thinkingTimer);
+              thinkingTimer = null;
+            }
             // 回答完成
             line(left, "\n[完成] 回答已生成");
           } else if (obj.type === "status") {
             line(left, `[status] ${obj.data}`);
           } else if (obj.type === "error") {
+            // 停止计时器
+            if (thinkingTimer) {
+              clearInterval(thinkingTimer);
+              thinkingTimer = null;
+            }
             line(left, `[error] ${obj.data}`);
           }
         } catch (e) {
@@ -249,9 +277,19 @@
       };
 
       ws.onerror = (e) => {
+        // 停止计时器
+        if (thinkingTimer) {
+          clearInterval(thinkingTimer);
+          thinkingTimer = null;
+        }
         line(left, `[ws-error] ${e?.message || e}`);
       };
       ws.onclose = () => {
+        // 停止计时器
+        if (thinkingTimer) {
+          clearInterval(thinkingTimer);
+          thinkingTimer = null;
+        }
         line(left, `WebSocket closed.`);
       };
     };
